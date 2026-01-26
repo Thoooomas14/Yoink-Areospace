@@ -1,5 +1,5 @@
 /**
- * @file motor-angular-rate.ino
+ * @file motor-angular-rate.ino 
  * @brief Arduino program to estimate motor speed from encoder (Left and Right).
  */
 
