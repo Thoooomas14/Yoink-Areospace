@@ -11,6 +11,7 @@
 
 // Need this library installed to access the UNO Wifi Rev2 board's IMU
 // For more details, look here: https://www.arduino.cc/reference/en/libraries/arduino_lsm6ds3/
+
 #include <Arduino_LSM6DS3.h>
 
 // Variables to store angular rates from the gyro [degrees/s]
@@ -61,12 +62,12 @@ void setup()
     Serial.print("Gyroscope sample rate: ");
     Serial.println(g_f);
 
-    float ox;
-    float oy;
-    float oz;
-    double avgx;
-    double avgy;
-    double avgz;
+    float ox = 0.0f;
+    float oy = 0.0f;
+    float oz = 0.0f;
+    double avgx = 0.0;
+    double avgy = 0.0;
+    double avgz = 0.0;
     for(int i=0; i<1000; i++){
         IMU.readGyroscope(ox, oy, oz);
         avgx += ox;
@@ -74,9 +75,18 @@ void setup()
         avgz += oz;
         delay(1);
     }
-    X_offset = avgx/-1000;
-    Y_offset = avgy/-1000;
-    Z_offset = avgz/-1000;
+    // compute negative average (offset) using floating point division
+    X_offset = -avgx / 1000.0;
+    Y_offset = -avgy / 1000.0;
+    Z_offset = -avgz / 1000.0;
+
+    // Debug: print computed offsets
+    Serial.print("Gyro offsets (deg/s): ");
+    Serial.print(X_offset);
+    Serial.print(", ");
+    Serial.print(Y_offset);
+    Serial.print(", ");
+    Serial.println(Z_offset);
 
 }
 

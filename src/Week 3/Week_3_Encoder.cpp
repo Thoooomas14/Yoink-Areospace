@@ -1,8 +1,8 @@
 /**
- * @file motor-angular-rate.ino 
+ * @file motor-angular-rate.ino
  * @brief Arduino program to estimate motor speed from encoder (Left and Right).
  */
-
+#include <Arduino.h>
 // --- LEFT MOTOR PINS ---
 // Wheel PWM pin
 int EA_L = 5;
