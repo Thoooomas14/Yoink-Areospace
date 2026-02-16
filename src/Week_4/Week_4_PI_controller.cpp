@@ -19,12 +19,10 @@ double X_offset = 0.0;
 double Y_offset = 0.0;
 double Z_offset = 0.0;
 
-float Kp_speed = 1.0f;
-float Ki_speed = 0.05f;
-float Kd_speed = 0.01f;
-float Kp_rot = 0.5f;
-float Ki_rot = 0.02f;
-float Kd_rot = 0.005f;
+float Kp_speed = 5.0f;
+float Ki_speed = 0.0f;
+float Kd_speed = 0.0f;
+
 
 float current_heading = 0.0; // Current robot angle in degrees
 float current_position = 0.0; // Current robot position in meters
@@ -32,9 +30,11 @@ float current_position = 0.0; // Current robot position in meters
 float targetSpeed = 0.0f;
 float targetRotation = 0.0f;
 
-float previousMillis = 0.0f;
+unsigned long previousMicros = 0;
 
 int state = 0;
+int count = 0;
+int DELAY = 0;
 // -------------------------------------------------------------- //
 // Encoder / wheel parameters (self-contained)
 // --- ENCODER PINS ---
@@ -83,11 +83,13 @@ static const uint8_t M_EA_L = 10; // Right motor PWM
 static const uint8_t M_I1 = 8;
 static const uint8_t M_I2 = 9;
 
-// Separate PID state for speed and rotation
-static float integral_speed = 0.0f;
-static float lastError_speed = 0.0f;
-static float integral_rot = 0.0f;
-static float lastError_rot = 0.0f;
+// Separate PID state for left and right wheels
+static float integral_L = 0.0f;
+static float lastError_L = 0.0f;
+static float integral_R = 0.0f;
+static float lastError_R = 0.0f;
+
+const float TRACK_WIDTH = 0.2775f; // Track width in meters
 
 // PID helper that uses external state references
 float PIDControlState(float sensorValue, float setpoint, float Kp, float Ki, float Kd, float &integralRef, float &lastErrorRef, float timeStep) {
@@ -104,7 +106,7 @@ float readSpeed() {
     // Compute/update wheel angular rates and return average linear speed [m/s]
     static float lastSpeed = 0.0f;
     static unsigned long last_time = 0;
-    const unsigned long T_local = 1000; // ms sampling interval (matches Week_3)
+    const unsigned long T_local = 50; // ms sampling interval (reduced for better PID response)
 
     unsigned long now = millis();
     if ((now - last_time) >= T_local) {
@@ -159,7 +161,7 @@ float readRotationRate() {
 
 void setup() {
     // Open the serial port at 115200 bps
-    Serial.begin(115200);
+    Serial.begin(57600);
 
     // Wait for serial connection before starting
     while (!Serial) {
@@ -214,6 +216,16 @@ void setup() {
     Serial.print(", ");
     Serial.println(Z_offset);
 
+    // Initialize encoder pins
+    pinMode(SIGNAL_A_L, INPUT);
+    pinMode(SIGNAL_B_L, INPUT);
+    pinMode(SIGNAL_A_R, INPUT);
+    pinMode(SIGNAL_B_R, INPUT);
+
+    // Attach interrupts for encoders
+    attachInterrupt(digitalPinToInterrupt(SIGNAL_A_L), decodeEncoderTicksL, RISING);
+    attachInterrupt(digitalPinToInterrupt(SIGNAL_A_R), decodeEncoderTicksR, RISING);
+
     // Initialize motor pins (use local pin names to avoid symbol collisions)
     pinMode(M_EA_L, OUTPUT);
     pinMode(M_I1, OUTPUT);
@@ -233,13 +245,22 @@ void setup() {
     analogWrite(M_EA_R, 0);
 
     delay(1000); // Wait a moment before starting
-
+    
     // No shared t_last here; readSpeed uses its own internal timing
 }
 
 void loop() {
-    float timestep = previousMillis == 0 ? 0.01f : (millis() - previousMillis) / 1000.0f; // in seconds
-    previousMillis = millis();
+    unsigned long currentMicros = micros();
+    // Guard against wrap-around or cleared counter, but mostly speed.
+    // Use roughly 1ms minimum check if you want, but simply checking for 0 dt is faster.
+    // To properly calculate dt using micros:
+    if (currentMicros <= previousMicros) {
+        // Just in case of weirdness or super fast loop
+        previousMicros = currentMicros;
+        return; 
+    }
+    float timestep = (currentMicros - previousMicros) / 1000000.0f;
+    previousMicros = currentMicros;
     // Read sensors
     float speed = readSpeed(); // m/s
     float rotationRate = readRotationRate(); // deg/s (gyro z)
@@ -255,63 +276,97 @@ void loop() {
         if (current_position >= 1.0f) {
             current_position = 0.0f; // reset for next leg
             state = 1;
+            DELAY = 1;
+            integral_L = 0.0f;
+            lastError_L = 0.0f;
+            integral_R = 0.0f;
+            lastError_R = 0.0f;
         }
         break;
     case 1:
-        targetSpeed = 0.0f;
-        targetRotation = 0.5f;
-        if (abs(current_heading - 180.0f) < 5.0f) { // within 5 degrees of target
-            current_heading = 180.0f; // snap to exact
-            current_position = 0.0f; // reset for next leg
-            state = 2;
-        }
-        break;
-    case 2:
-        targetSpeed = 0.5f;
         targetRotation = 0.0f;
-        if (current_position >= 2.0f) {
-            state = 3;
+        targetSpeed = 0.0f;
+        if (DELAY % 100 == 0) {
+            state = 2;
+            current_position = 0.0f;
+            current_heading = 0.0f;
+            DELAY = 0;
+            integral_L = 0.0f;
+            lastError_L = 0.0f;
+            integral_R = 0.0f;
+            lastError_R = 0.0f;
+        }
+        else {
+            DELAY ++;
+        }
+    break;
+    case 2:
+        targetSpeed = 0.0f;
+        targetRotation = 5.0f;
+        if (abs(abs(current_heading) - 160.0f) < 5.0f) { // within 5 degrees of target
+            current_heading = 0.0f; // snap to exact
+            current_position = 0.0f; // reset for next leg
+            state = 0;
         }
         break;
     default:
         break;
     }
 
-    Serial.print(targetSpeed); Serial.print(", "); Serial.print(speed); Serial.print(" | ");
-    Serial.print(targetRotation); Serial.print(", "); Serial.println(rotationRate);
-    Serial.print("Heading: "); Serial.print(current_heading); Serial.print(" | Position: "); Serial.println(current_position);
-    // Calculate PID output for speed control (uses its own state)
-    float speedControl = PIDControlState(speed, targetSpeed, Kp_speed, Ki_speed, Kd_speed, integral_speed, lastError_speed, timestep);
-    // Rotation PID (keep rover facing straight: target rotation = 0 deg/s)
-    
-    float rotationControl = PIDControlState(rotationRate, targetRotation, Kp_rot, Ki_rot, Kd_rot, integral_rot, lastError_rot, timestep);
+    // Calculate measured speeds for each wheel [m/s]
+    float speed_L = (float)omega_L * (float)p;
+    float speed_R = (float)omega_R * (float)p;
 
-    Serial.print("Speed Control: "); Serial.print(speedControl);
-    Serial.print(" | Rotation Control: "); Serial.println(rotationControl);
+    // Calculate target speeds for each wheel (Unicycle model)
+    // Assumes targetRotation is in rad/s.
+    float target_speed_L = targetSpeed - (targetRotation * TRACK_WIDTH / 2.0f);
+    float target_speed_R = targetSpeed + (targetRotation * TRACK_WIDTH / 2.0f);
+
+    // Run PID for each wheel
+    float control_L = PIDControlState(speed_L, target_speed_L, Kp_speed, Ki_speed, Kd_speed, integral_L, lastError_L, timestep);
+    float control_R = PIDControlState(speed_R, target_speed_R, Kp_speed, Ki_speed, Kd_speed, integral_R, lastError_R, timestep);
+
+    if (count % 10 == 0) {
+        Serial.print("Error Left: "); Serial.print(target_speed_L - speed_L); Serial.print(" Error Right: "); Serial.print(target_speed_R - speed_R);
+        Serial.print("Actual Left: "); Serial.print(speed_L); Serial.print(" Actual Right: "); Serial.println(speed_R);
+        // Serial.print("Overall Target: "); Serial.print(targetSpeed); Serial.print(", "); Serial.print(speed); Serial.print(" | ");
+        // Serial.print("Target Left: "); Serial.print(target_speed_L); Serial.print(" Actual Left: "); Serial.print(speed_L); Serial.print(" | ");
+        // Serial.print("Target Right: "); Serial.print(target_speed_R); Serial.print(" Actual Right: "); Serial.println(speed_R); Serial.print(" | ");
+        // Serial.print("Position: "); Serial.print(current_position); Serial.print(" Heading: "); Serial.print(current_heading); Serial.print(" | ");
+        // Serial.print("Control Left: "); Serial.print(control_L); Serial.print(" Control Right: "); Serial.println(control_R); Serial.print(" | ");
+        // Serial.print("State: "); Serial.println(state);
+        count = 0;
+    }
+
     // Map PID outputs to motor PWM commands
-    // These gains convert controller output to PWM space; tune on hardware
-    float speedToPWM = 50.0f;
-    float rotToPWM = 40.0f;
-
-    float basePWM = 120.0f + speedControl * speedToPWM; // base command
-    float diff = rotationControl * rotToPWM; // differential correction
-
-    float leftPWMf = basePWM - diff;
-    float rightPWMf = basePWM + diff;
-
-    // Constrain and convert to bytes
-    int leftPWM = constrain((int)round(leftPWMf), 0, 255);
-    int rightPWM = constrain((int)round(rightPWMf), 0, 255);
-
-    // Set motor directions (assume positive -> forward)
-    digitalWrite(M_I1, LOW);
-    digitalWrite(M_I2, HIGH);
-    analogWrite(M_EA_L, leftPWM);
-
-    digitalWrite(M_I3, LOW);
-    digitalWrite(M_I4, HIGH);
-    analogWrite(M_EA_R, rightPWM);
-
+    float speedToPWM = 100.0f;
     
-    delay(10);
+    float leftPWMf = control_L * speedToPWM;
+    float rightPWMf = control_R * speedToPWM;
+
+    // Set motor directions based on sign of PWM
+    // LEFT MOTOR
+    if (round(leftPWMf) >= 0) {
+        digitalWrite(M_I1, LOW);
+        digitalWrite(M_I2, HIGH);
+        analogWrite(M_EA_L, constrain((int)round(leftPWMf), 0, 255));
+    } else {
+        digitalWrite(M_I1, HIGH);
+        digitalWrite(M_I2, LOW);
+        analogWrite(M_EA_L, constrain((int)round(-leftPWMf), 0, 255));
+    }
+
+    // RIGHT MOTOR
+    if (round(rightPWMf) >= 0) {
+        digitalWrite(M_I3, LOW);
+        digitalWrite(M_I4, HIGH);
+        analogWrite(M_EA_R, constrain((int)round(rightPWMf), 0, 255));
+    } else {
+        digitalWrite(M_I3, HIGH);
+        digitalWrite(M_I4, LOW);
+        analogWrite(M_EA_R, constrain((int)round(-rightPWMf), 0, 255));
+    }
+
+    delay(100);
+    count ++;
 }
