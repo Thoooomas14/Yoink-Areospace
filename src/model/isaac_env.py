@@ -6,9 +6,13 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
 from isaaclab.sensors import RayCasterCfg, patterns
 from isaaclab.managers import SceneEntityCfg, ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg, EventTermCfg
-import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
+import isaaclab.sim as sim_utils
+from isaaclab.sim.spawners.from_files.from_files_cfg import UrdfFileCfg
+from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfRandomUniformTerrainCfg, HfDiscreteObstaclesTerrainCfg
 import isaaclab.envs.mdp as mdp
+import os
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 # --- 1. Scene Configuration ---
 @configclass
@@ -16,9 +20,41 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
     """Configuration for the Lynxmotion A4WD1 scene."""
     
     # Ground Plane
-    ground = AssetBaseCfg(
+    terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(),
+        terrain_type="generator",
+        terrain_generator=TerrainGeneratorCfg(
+            seed=42,
+            size=(20.0, 20.0),
+            border_width=5.0,
+            num_rows=1,
+            num_cols=1,
+            horizontal_scale=0.1,
+            vertical_scale=0.005,
+            sub_terrains={
+                "rough": HfRandomUniformTerrainCfg(
+                    proportion=0.5, noise_range=(0.005, 0.02), noise_step=0.005, downsampled_scale=0.2
+                ),
+                "obstacles": HfDiscreteObstaclesTerrainCfg(
+                    proportion=0.5,
+                    obstacle_width_range=(0.2, 0.6),
+                    obstacle_height_range=(0.1, 0.3),
+                    num_obstacles=150,
+                    platform_width=1.0,
+                ),
+            },
+        ),
+        max_init_terrain_level=0,
+        collision_group=-1,
+    )
+
+    # Mars-like lighting
+    light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=1500.0,
+            color=(1.0, 0.85, 0.7),  # warm Mars-like sunlight
+        ),
     )
 
     # THE ROBOT: 4-Wheel Skid Steer Configuration
@@ -26,19 +62,21 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
     # We use the Husky here as a placeholder because it has the same 4-wheel kinematics.
     robot = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Clearpath/Husky/husky.usd", 
+        spawn=UrdfFileCfg(
+            asset_path=f"{os.path.abspath(os.path.join(os.path.dirname(__file__), 'lynx.urdf'))}", 
             activate_contact_sensors=False,
-            scale=(0.3, 0.3, 0.3), # Scaling down Husky to roughly match A4WD1 size (~30cm)
+            make_instanceable=False,
+            fix_base=False,
+            joint_drive=UrdfFileCfg.JointDriveCfg(
+                gains=UrdfFileCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0)
+            )
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.1),
+            pos=(0.0, 0.0, 0.2), # Height to drop from slightly
         ),
         actuators={
-            # We define one actuator group for all 4 wheels
-            "all_wheels": ImplicitActuatorCfg(
-                # These names must match the joints in your USD
-                joint_names_expr=["front_left_wheel", "rear_left_wheel", "front_right_wheel", "rear_right_wheel"],
+            "wheels": ImplicitActuatorCfg(
+                joint_names_expr=["joint_fl", "joint_fr", "joint_rl", "joint_rr"],
                 effort_limit=20.0,
                 velocity_limit=15.0,
                 stiffness=0.0,
@@ -50,21 +88,26 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
     # Target (Red Sphere)
     target = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Target",
-        spawn=sim_utils.SphereCfg(radius=0.1, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0))),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 2.0, 0.1)),
-        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        spawn=sim_utils.SphereCfg(
+            radius=0.1, 
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 2.0, 0.5)),
     )
 
-    # Lidar Sensor (24 samples, 360 degrees)
+    # Lidar Sensor (25 samples, 360 degrees)
     lidar = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base_link/lidar", # Ensure this attaches to the correct body link name
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.2)),
+        prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.10, 0.06, 0.18)),
         attach_yaw_only=True,
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1, 
             vertical_fov_range=(0.0, 0.0),
             horizontal_fov_range=(0, 360),
-            horizontal_fov_count=24 # Matches your NN input
+            horizontal_res=14.4 # Matches your NN input of 25 rays (360/14.4 = 25)
         ),
         debug_vis=False, 
         mesh_prim_paths=["/World/ground"], 
@@ -109,44 +152,61 @@ def rew_success(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: S
     dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
     return (dist < 0.25).float() * 50.0
 
+@configclass
+class ObservationsCfg:
+    @configclass
+    class PolicyCfg(ObservationGroupCfg):
+        pos = ObservationTermCfg(func=obs_current_pos, params={"sensor_cfg": SceneEntityCfg("robot")})
+        target = ObservationTermCfg(func=obs_target_pos, params={"sensor_cfg": SceneEntityCfg("target")})
+        lidar = ObservationTermCfg(func=obs_lidar, params={"sensor_cfg": SceneEntityCfg("lidar")})
+
+        def __post_init__(self):
+            self.concatenate_terms = True
+
+    policy: PolicyCfg = PolicyCfg()
+
+
 # --- 4. Environment Config ---
 @configclass
+class ActionsCfg:
+    """Action specifications for the environment."""
+    wheels: mdp.JointVelocityActionCfg = mdp.JointVelocityActionCfg(
+        asset_name="robot",
+        joint_names=["joint_fl", "joint_fr", "joint_rl", "joint_rr"],
+        scale=10.0,
+    )
+
+@configclass
 class EnvCfg(ManagerBasedRLEnvCfg):
-    scene = LynxmotionSceneCfg(num_envs=4, env_spacing=4.0)
+    """Configuration for the reinforcement learning environment."""
+    # Scene settings
+    scene = LynxmotionSceneCfg(num_envs=16, env_spacing=4.0)
     episode_length_s = 15.0
     decimation = 4 # Skid steer often needs slightly coarser control steps (approx 30Hz-50Hz)
 
-    actions = {
-        # We control 4 joints, but we will feed it a (N,4) tensor manually constructed from your (N,2) model output
-        "wheels": mdp.JointVelocityAction(
-            asset_name="robot", 
-            joint_names=["front_left_wheel", "rear_left_wheel", "front_right_wheel", "rear_right_wheel"], 
-            scale=10.0
-        )
-    }
+    observations: ObservationsCfg = ObservationsCfg()
 
-    observations = {
-        "policy": ObservationGroupCfg(
-            concatenated=True,
-            term_order=["pos", "target", "lidar"], 
-            terms={
-                "pos": ObservationTermCfg(func=obs_current_pos, params={"sensor_cfg": SceneEntityCfg("robot")}),
-                "target": ObservationTermCfg(func=obs_target_pos, params={"sensor_cfg": SceneEntityCfg("target")}),
-                "lidar": ObservationTermCfg(func=obs_lidar, params={"sensor_cfg": SceneEntityCfg("lidar")}),
-            },
-        )
-    }
+    # Action settings
+    actions = ActionsCfg()
 
     events = {
         "reset_robot": EventTermCfg(
             func=mdp.reset_root_state_uniform,
             mode="reset",
-            params={"pose_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0)}, "asset_cfg": SceneEntityCfg("robot")},
+            params={
+                "pose_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0)}, 
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
+                "asset_cfg": SceneEntityCfg("robot")
+            },
         ),
         "reset_target": EventTermCfg(
             func=mdp.reset_root_state_uniform,
             mode="reset",
-            params={"pose_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0)}, "asset_cfg": SceneEntityCfg("target")},
+            params={
+                "pose_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0)}, 
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
+                "asset_cfg": SceneEntityCfg("target")
+            },
         ),
     }
 
