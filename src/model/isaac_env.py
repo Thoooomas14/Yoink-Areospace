@@ -12,7 +12,7 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import UrdfFileCfg
 from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfRandomUniformTerrainCfg, HfDiscreteObstaclesTerrainCfg
 import isaaclab.envs.mdp as mdp
 import os
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, NVIDIA_NUCLEUS_DIR
 
 # --- 1. Scene Configuration ---
 @configclass
@@ -30,22 +30,19 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
             num_rows=1,
             num_cols=1,
             horizontal_scale=0.1,
-            vertical_scale=0.005,
+            vertical_scale=0.001,
             sub_terrains={
-                "rough": HfRandomUniformTerrainCfg(
-                    proportion=0.5, noise_range=(0.005, 0.02), noise_step=0.005, downsampled_scale=0.2
-                ),
-                "obstacles": HfDiscreteObstaclesTerrainCfg(
-                    proportion=0.5,
-                    obstacle_width_range=(0.2, 0.6),
-                    obstacle_height_range=(0.1, 0.3),
-                    num_obstacles=150,
-                    platform_width=1.0,
+                "sand": HfRandomUniformTerrainCfg(
+                    proportion=1.0, noise_range=(0.0, 0.01), noise_step=0.001, downsampled_scale=0.1
                 ),
             },
         ),
         max_init_terrain_level=0,
         collision_group=-1,
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl",
+            project_uvw=True,
+        ),
     )
 
     # Mars-like lighting
@@ -85,24 +82,61 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
         },
     )
 
-    # Target (Red Sphere)
+    # Target (Red Cylinder)
     target = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Target",
-        spawn=sim_utils.SphereCfg(
-            radius=0.1, 
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+        spawn=sim_utils.CylinderCfg(
+            radius=0.15,
+            height=0.4,
+            axis="Z",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 2.0, 0.5)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 2.0, 0.2)),
+    )
+
+    # Obstacles (Cylinders)
+    obstacle_1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Obstacle_1",
+        spawn=sim_utils.CylinderCfg(
+            radius=0.15, height=0.4, axis="Z",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=10.0),
+            visual_material=sim_utils.MdlFileCfg(mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl", project_uvw=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 1.0, 0.2)),
+    )
+    obstacle_2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Obstacle_2",
+        spawn=sim_utils.CylinderCfg(
+            radius=0.25, height=0.4, axis="Z",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=10.0),
+            visual_material=sim_utils.MdlFileCfg(mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl", project_uvw=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-1.0, 1.0, 0.2)),
+    )
+    obstacle_3 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Obstacle_3",
+        spawn=sim_utils.CylinderCfg(
+            radius=0.20, height=0.4, axis="Z",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=10.0),
+            visual_material=sim_utils.MdlFileCfg(mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl", project_uvw=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -1.0, 0.2)),
     )
 
     # Lidar Sensor (25 samples, 360 degrees)
     lidar = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.10, 0.06, 0.18)),
-        attach_yaw_only=True,
+        ray_alignment="yaw",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1, 
             vertical_fov_range=(0.0, 0.0),
@@ -110,7 +144,7 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
             horizontal_res=14.4 # Matches your NN input of 25 rays (360/14.4 = 25)
         ),
         debug_vis=False, 
-        mesh_prim_paths=["/World/ground"], 
+        mesh_prim_paths=["/World"], 
     )
 
 # --- 2. Observation Functions ---
@@ -206,6 +240,33 @@ class EnvCfg(ManagerBasedRLEnvCfg):
                 "pose_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0)}, 
                 "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
                 "asset_cfg": SceneEntityCfg("target")
+            },
+        ),
+        "reset_obstacles_1": EventTermCfg(
+            func=mdp.reset_root_state_uniform,
+            mode="reset",
+            params={
+                "pose_range": {"x": (-4.0, 4.0), "y": (-4.0, 4.0)},
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
+                "asset_cfg": SceneEntityCfg("obstacle_1")
+            },
+        ),
+        "reset_obstacles_2": EventTermCfg(
+            func=mdp.reset_root_state_uniform,
+            mode="reset",
+            params={
+                "pose_range": {"x": (-4.0, 4.0), "y": (-4.0, 4.0)},
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
+                "asset_cfg": SceneEntityCfg("obstacle_2")
+            },
+        ),
+        "reset_obstacles_3": EventTermCfg(
+            func=mdp.reset_root_state_uniform,
+            mode="reset",
+            params={
+                "pose_range": {"x": (-4.0, 4.0), "y": (-4.0, 4.0)},
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)},
+                "asset_cfg": SceneEntityCfg("obstacle_3")
             },
         ),
     }
