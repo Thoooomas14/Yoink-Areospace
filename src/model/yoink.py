@@ -9,7 +9,8 @@ from torch.distributions import Normal
 class ActorCritic(nn.Module):
     def __init__(self):
         super().__init__()
-        self.input_dim = 28 # 2 (pos) + 2 (target) + 24 (lidar)
+        # Input: 2 (local robot vel) + 2 (ego-centric target pos) + 24 (lidar)
+        self.input_dim = 28 
         self.output_dim = 2
         
         # Policy Network (Actor)
@@ -141,29 +142,38 @@ class PPO:
         advantages = rewards.unsqueeze(1) - old_values
         
         # Optimize policy for K epochs
+        batch_size = old_states.shape[0]
+        mini_batch_size = 16384 # Bound memory usage per forward pass
+
         for _ in range(self.K_epochs):
-            # Evaluating old actions and values
-            log_probs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+            # Shuffle the data
+            indices = torch.randperm(batch_size, device="cuda")
             
-            # Match state_values tensor dimensions with rewards tensor
-            state_values = state_values.squeeze()
-            
-            # Core PPO ratio
-            ratios = torch.exp(log_probs - old_log_probs)
-            
-            # Clipped Surrogate Objective Loss
-            surr1 = ratios * advantages.squeeze()
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages.squeeze()
-            
-            # Loss = -Clipping + Value_loss - Entropy_bonus
-            # Minimize - (min(surr1, surr2)) which maximizes the surrogate objective
-            v_loss = self.MseLoss(state_values, rewards.squeeze())
-            loss = -torch.min(surr1, surr2) + 0.5 * v_loss - 0.01 * dist_entropy
-            
-            # Take gradient step
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
+            for i in range(0, batch_size, mini_batch_size):
+                mb_idx = indices[i : i + mini_batch_size]
+
+                # Evaluating old actions and values for the mini-batch
+                log_probs, state_values, dist_entropy = self.policy.evaluate(old_states[mb_idx], old_actions[mb_idx])
+                
+                # Match state_values tensor dimensions with rewards tensor
+                state_values = state_values.squeeze()
+                
+                # Core PPO ratio
+                ratios = torch.exp(log_probs - old_log_probs[mb_idx])
+                
+                # Clipped Surrogate Objective Loss
+                mb_advantages = advantages[mb_idx].squeeze()
+                surr1 = ratios * mb_advantages
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
+                
+                # Loss = -Clipping + Value_loss - Entropy_bonus
+                v_loss = self.MseLoss(state_values, rewards[mb_idx].squeeze())
+                loss = -torch.min(surr1, surr2) + 0.5 * v_loss - 0.01 * dist_entropy
+                
+                # Take gradient step
+                self.optimizer.zero_grad()
+                loss.mean().backward()
+                self.optimizer.step()
             
         # Copy new weights to old policy
         self.policy_old.load_state_dict(self.policy.state_dict())

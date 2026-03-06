@@ -150,11 +150,33 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
 # --- 2. Observation Functions ---
 def obs_current_pos(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     robot = env.scene[sensor_cfg.name]
-    return robot.data.root_pos_w[:, :2]
+    # Return robot's local velocity [Forward Speed, Yaw Rate] instead of position
+    # This helps the neural net know how fast it is currently driving/turning!
+    lin_vel_x = robot.data.root_lin_vel_b[:, 0]  # Forward velocity in body frame
+    ang_vel_z = robot.data.root_ang_vel_b[:, 2]  # Yaw rate in body frame
+    return torch.stack([lin_vel_x, ang_vel_z], dim=1)
 
 def obs_target_pos(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     target = env.scene[sensor_cfg.name]
-    return target.data.root_pos_w[:, :2]
+    robot = env.scene["robot"]
+    
+    # 1. Get relative vector (Target - Robot) in World Frame
+    target_vec_w = target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
+    
+    # 2. Get Robot's Forward Vector in World Frame
+    quat = robot.data.root_quat_w
+    quat_w, quat_x, quat_y, quat_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    forward_x = 1.0 - 2.0 * (quat_y**2 + quat_z**2)
+    forward_y = 2.0 * (quat_x * quat_y + quat_w * quat_z)
+    
+    # 3. Project Target Vector onto Robot's Local Axes (Ego-Centric Frame)
+    # Dot product with Forward Vector = Local X (Distance straight ahead)
+    local_x = target_vec_w[:, 0] * forward_x + target_vec_w[:, 1] * forward_y
+    # Dot product with Left Vector (-y, x) = Local Y (Distance to the left/right)
+    local_y = target_vec_w[:, 0] * (-forward_y) + target_vec_w[:, 1] * forward_x
+    
+    # Return Target Position purely relative to the robot's nose!
+    return torch.stack([local_x, local_y], dim=1)
 
 def obs_lidar(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     lidar = env.scene[sensor_cfg.name]
@@ -178,13 +200,51 @@ def rew_distance(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: 
     robot = env.scene[robot_cfg.name]
     target = env.scene[target_cfg.name]
     dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
-    return -dist
+    
+    # Smooth continuous reward (closer is better, max 1.0)
+    return 1.0 / (1.0 + dist)
 
 def rew_success(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
     robot = env.scene[robot_cfg.name]
     target = env.scene[target_cfg.name]
     dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
-    return (dist < 0.25).float() * 50.0
+    
+    # Continuous bonus for being very close
+    return torch.where(dist < 0.4, 3.0, 0.0)
+
+def rew_alignment(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
+    robot = env.scene[robot_cfg.name]
+    target = env.scene[target_cfg.name]
+    
+    # Vector from robot to target
+    target_vec = target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
+    target_dist = torch.norm(target_vec, dim=1)
+    target_dir = target_vec / (target_dist.unsqueeze(1) + 1e-5)
+    
+    # Robot forward direction (assuming X is forward in local frame)
+    # We can get this from the quaternion or just use root_forward_w if available
+    # Isaac Lab's RigidObjectData usually has root_quat_w
+    # A simple way to get heading in 2D from quat (w, x, y, z):
+    # heading = atan2(2*(w*z + x*y), 1 - 2*(y**2 + z**2))
+    # Or more directly, transform the local +X vector (1, 0, 0) by the quaternion
+    # Isaac Lab provides `data.projected_gravity_b` or similar, but we can compute forward:
+    
+    # We can use the math utility or manually compute.
+    # To keep dependencies minimal:
+    quat = robot.data.root_quat_w
+    # q = [w, x, y, z] -> forward vector is primarily the first column of the rotation matrix
+    # vx = 1 - 2*(y^2 + z^2), vy = 2*(x*y + w*z)
+    quat_w, quat_x, quat_y, quat_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    forward_x = 1.0 - 2.0 * (quat_y**2 + quat_z**2)
+    forward_y = 2.0 * (quat_x * quat_y + quat_w * quat_z)
+    
+    robot_dir = torch.stack([forward_x, forward_y], dim=1)
+    
+    # Dot product gives the cosine of the angle between them
+    alignment = torch.sum(target_dir * robot_dir, dim=1)
+    
+    # Reward positive alignment (facing target)
+    return alignment
 
 @configclass
 class ObservationsCfg:
@@ -272,8 +332,9 @@ class EnvCfg(ManagerBasedRLEnvCfg):
     }
 
     rewards = {
-        "tracking": RewardTermCfg(func=rew_distance, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=1.5),
-        "success": RewardTermCfg(func=rew_success, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=1.0),
+        "tracking": RewardTermCfg(func=rew_distance, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=2.0),
+        "alignment": RewardTermCfg(func=rew_alignment, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.5),
+        "success": RewardTermCfg(func=rew_success, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=2.0),
     }
     
     terminations = {

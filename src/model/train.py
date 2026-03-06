@@ -31,7 +31,7 @@ def main():
     
     ppo_agent = PPO(state_dim, action_dim, lr=0.001, gamma=0.99, K_epochs=4, eps_clip=0.2)
     
-    update_timestep = 2000 # update policy every 2000 timesteps
+    update_timestep = 200 # update policy every 200 timesteps
     max_training_timesteps = 500000
 
     time_step = 0
