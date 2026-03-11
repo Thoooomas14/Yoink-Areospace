@@ -26,8 +26,8 @@ class ActorCritic(nn.Module):
         )
         
         # Action standard deviation (learnable parameter)
-        # Start with standard deviation of 1.0 (log_std = 0)
-        self.action_log_std = nn.Parameter(torch.zeros(1, self.output_dim))
+        # Start with standard deviation of ~0.606 (log_std = -0.5) so actions don't constantly slam the Tanh boundary.
+        self.action_log_std = nn.Parameter(torch.ones(1, self.output_dim) * -0.5)
         
         # Value Network (Critic)
         self.critic = nn.Sequential(
@@ -135,10 +135,7 @@ class PPO:
             
         rewards = torch.cat(rewards, dim=0).to("cuda")
         
-        # Normalize returns
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
-        
-        # Compute Advantages
+        # Compute Advantages (Global)
         advantages = rewards.unsqueeze(1) - old_values
         
         # Optimize policy for K epochs
@@ -161,12 +158,15 @@ class PPO:
                 # Core PPO ratio
                 ratios = torch.exp(log_probs - old_log_probs[mb_idx])
                 
-                # Clipped Surrogate Objective Loss
+                # Mini-Batch Advantage Normalization
                 mb_advantages = advantages[mb_idx].squeeze()
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                
+                # Clipped Surrogate Objective Loss
                 surr1 = ratios * mb_advantages
                 surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
                 
-                # Loss = -Clipping + Value_loss - Entropy_bonus
+                # Loss = -Policy + Value_loss - Entropy_bonus
                 v_loss = self.MseLoss(state_values, rewards[mb_idx].squeeze())
                 loss = -torch.min(surr1, surr2) + 0.5 * v_loss - 0.01 * dist_entropy
                 
