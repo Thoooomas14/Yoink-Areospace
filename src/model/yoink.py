@@ -1,184 +1,42 @@
-# Neural Network and PPO agent implementation
-
+import os
 import torch
 import torch.nn as nn
-# Remove Isaac Lab env imports to prevent omni.physics initialization errors
+from stable_baselines3 import PPO
+from stable_baselines3.common.policies import ActorCriticPolicy
 
-from torch.distributions import Normal
+# Note: We don't need to define ActorCritic or RolloutBuffer classes anymore.
+# Stable Baselines3 handles these internally.
 
-class ActorCritic(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # Input: 2 (local robot vel) + 2 (ego-centric target pos) + 24 (lidar)
-        self.input_dim = 28 
-        self.output_dim = 2
-        
-        # Policy Network (Actor)
-        self.actor = nn.Sequential(
-            nn.Linear(self.input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, self.output_dim),
-            nn.Tanh() # Outputs -1.0 to 1.0
-        )
-        
-        # Action standard deviation (learnable parameter)
-        # Start with standard deviation of ~0.606 (log_std = -0.5) so actions don't constantly slam the Tanh boundary.
-        self.action_log_std = nn.Parameter(torch.ones(1, self.output_dim) * -0.5)
-        
-        # Value Network (Critic)
-        self.critic = nn.Sequential(
-            nn.Linear(self.input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1) # Outputs a single value estimate
-        )
+def get_ppo_agent(env, lr=3e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99):
+    """
+    Initializes a Stable Baselines3 PPO agent.
+    
+    Args:
+        env: The Isaac Lab environment instance (wrapped for SB3).
+        lr: Learning rate.
+        n_steps: The number of steps to run for each environment per update.
+        batch_size: Minibatch size.
+        n_epochs: Number of epochs when optimizing the surrogate loss.
+        gamma: Discount factor.
+    """
+    
+    # Policy keyword arguments to match your previous architecture (128 -> 32)
+    policy_kwargs = dict(
+        activation_fn=nn.ReLU,
+        net_arch=dict(pi=[128, 32], qf=[128, 32])
+    )
 
-    def forward(self, obs_tensor):
-        action_mean = self.actor(obs_tensor)
-        value = self.critic(obs_tensor)
-        return action_mean, value
-        
-    def sample_action(self, obs_tensor):
-        action_mean, value = self(obs_tensor)
-        action_log_std = self.action_log_std.expand_as(action_mean)
-        action_std = torch.exp(action_log_std)
-        
-        dist = Normal(action_mean, action_std)
-        action = dist.sample()
-        
-        # Enforce action limits due to Tanh (-1, 1) environment assumptions
-        action = torch.clamp(action, -1.0, 1.0)
-        
-        action_log_prob = dist.log_prob(action).sum(dim=-1)
-        return action, action_log_prob, value
-        
-    def evaluate(self, obs_tensor, action):
-        action_mean, value = self(obs_tensor)
-        action_log_std = self.action_log_std.expand_as(action_mean)
-        action_std = torch.exp(action_log_std)
-        
-        dist = Normal(action_mean, action_std)
-        action_log_prob = dist.log_prob(action).sum(dim=-1)
-        dist_entropy = dist.entropy().sum(dim=-1)
-        
-        return action_log_prob, value, dist_entropy
-
-class RolloutBuffer:
-    def __init__(self):
-        self.states = []
-        self.actions = []
-        self.log_probs = []
-        self.rewards = []
-        self.values = []
-        self.dones = []
-        
-    def clear(self):
-        self.states.clear()
-        self.actions.clear()
-        self.log_probs.clear()
-        self.rewards.clear()
-        self.values.clear()
-        self.dones.clear()
-
-class PPO:
-    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, K_epochs=4, eps_clip=0.2):
-        self.gamma = gamma
-        self.eps_clip = eps_clip
-        self.K_epochs = K_epochs
-        
-        self.buffer = RolloutBuffer()
-        
-        self.policy = ActorCritic().to("cuda")
-        self.policy_old = ActorCritic().to("cuda")
-        self.policy_old.load_state_dict(self.policy.state_dict())
-        
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-        self.MseLoss = nn.MSELoss()
-
-    def select_action(self, state):
-        with torch.no_grad():
-            action, action_log_prob, state_val = self.policy_old.sample_action(state)
-        
-        self.buffer.states.append(state)
-        self.buffer.actions.append(action)
-        self.buffer.log_probs.append(action_log_prob)
-        self.buffer.values.append(state_val)
-
-        return action
-        
-    def update(self):
-        # Flatten the buffer tensors
-        old_states = torch.cat(self.buffer.states, dim=0).detach()
-        old_actions = torch.cat(self.buffer.actions, dim=0).detach()
-        old_log_probs = torch.cat(self.buffer.log_probs, dim=0).detach()
-        old_values = torch.cat(self.buffer.values, dim=0).detach()
-        
-        rewards = []
-        discounted_reward = 0
-        
-        # Calculate returns
-        for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.dones)):
-            if type(discounted_reward) is int:
-                discounted_reward = torch.zeros_like(reward)
-            
-            # Reset discounted reward to 0 for environments that just terminated
-            discounted_reward = torch.where(is_terminal, torch.zeros_like(discounted_reward), discounted_reward)
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            rewards.insert(0, discounted_reward)
-            
-        rewards = torch.cat(rewards, dim=0).to("cuda")
-        
-        # Compute Advantages (Global)
-        advantages = rewards.unsqueeze(1) - old_values
-        
-        # Optimize policy for K epochs
-        batch_size = old_states.shape[0]
-        mini_batch_size = 16384 # Bound memory usage per forward pass
-
-        for _ in range(self.K_epochs):
-            # Shuffle the data
-            indices = torch.randperm(batch_size, device="cuda")
-            
-            for i in range(0, batch_size, mini_batch_size):
-                mb_idx = indices[i : i + mini_batch_size]
-
-                # Evaluating old actions and values for the mini-batch
-                log_probs, state_values, dist_entropy = self.policy.evaluate(old_states[mb_idx], old_actions[mb_idx])
-                
-                # Match state_values tensor dimensions with rewards tensor
-                state_values = state_values.squeeze()
-                
-                # Core PPO ratio
-                ratios = torch.exp(log_probs - old_log_probs[mb_idx])
-                
-                # Mini-Batch Advantage Normalization
-                mb_advantages = advantages[mb_idx].squeeze()
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-                
-                # Clipped Surrogate Objective Loss
-                surr1 = ratios * mb_advantages
-                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
-                
-                # Loss = -Policy + Value_loss - Entropy_bonus
-                v_loss = self.MseLoss(state_values, rewards[mb_idx].squeeze())
-                loss = -torch.min(surr1, surr2) + 0.5 * v_loss - 0.01 * dist_entropy
-                
-                # Take gradient step
-                self.optimizer.zero_grad()
-                loss.mean().backward()
-                self.optimizer.step()
-            
-        # Copy new weights to old policy
-        self.policy_old.load_state_dict(self.policy.state_dict())
-        
-        # Clear buffer
-        self.buffer.clear()
-
-
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=lr,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        gamma=gamma,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        device="cuda"
+    )
+    
+    return model

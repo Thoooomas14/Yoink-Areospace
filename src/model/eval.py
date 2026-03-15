@@ -1,129 +1,144 @@
 import sys
 import os
 import argparse
+import numpy as np
 import torch
+import traceback
 
 from isaaclab.app import AppLauncher
 
-# Add argparse arguments for Isaac Lab AppLauncher
-parser = argparse.ArgumentParser(description="Yoink RL Evaluation")
-parser.add_argument("--num_envs", type=int, default=4, help="Number of parallel environments for evaluation")
-parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file to load")
-parser.add_argument("--tracking_weight", type=float, default=3.0, help="Weight for distance tracking reward")
-parser.add_argument("--alignment_weight", type=float, default=0.0, help="Weight for facing the target reward")
-parser.add_argument("--success_weight", type=float, default=5.0, help="Weight for reaching the target")
-parser.add_argument("--collision_weight", type=float, default=-1.0, help="Weight for hitting obstacles")
-parser.add_argument("--video", action="store_true", help="Record mp4 video of the evaluation")
+# --- 1. CLI Setup ---
+parser = argparse.ArgumentParser(description="Lynxmotion A4WD1 SB3 Evaluation with Live Debugging")
+parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel environments")
+parser.add_argument("--checkpoint", type=str, help="Path to the SB3 checkpoint .zip file")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# Launch Omniverse application
+# Launch app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym
+# --- 2. Imports (Post-App Launch) ---
+import omni.ui as ui
+import omni.timeline
+from stable_baselines3 import PPO
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab_rl.sb3 import Sb3VecEnvWrapper
+
 from src.model.isaac_env import EnvCfg
-from src.model.yoink import PPO
+
+
+def build_ui():
+    """Build the debug UI window.
+    Returns (window, labels) — caller MUST hold 'window' reference or it gets GC'd.
+    """
+    window = ui.Window("Lynxmotion SB3 Debugger", width=440, height=500)
+    labels = {}
+    with window.frame:
+        with ui.VStack(spacing=8, style={"padding": 14}):
+            ui.Label("LIVE SB3 NEURAL NETWORK I/O",
+                     style={"font_size": 20, "color": 0xFF00FF00})
+            ui.Line(style={"color": 0xFF555555})
+
+            ui.Label("── OBSERVATIONS ──",
+                     style={"font_size": 13, "color": 0xFF00AAFF})
+            labels["imu"]    = ui.Label("IMU  [LinVel-X, YawRate]: ---",
+                                        style={"font_size": 13, "color": 0xFFFFFFFF})
+            labels["target"] = ui.Label("Goal [Dist-norm, Angle]:  ---",
+                                        style={"font_size": 13, "color": 0xFFFFFFFF})
+
+            ui.Spacer(height=4)
+            ui.Label("── LIDAR (0.0 = close, 1.0 = 10 m+) ──",
+                     style={"font_size": 12, "color": 0xFFAAAAAA})
+            labels["lidar"]  = ui.Label("---",
+                                        style={"font_size": 11, "color": 0xFFCCCCCC,
+                                               "word_wrap": True})
+
+            ui.Line(style={"color": 0xFF555555})
+            ui.Label("── ACTIONS ──",
+                     style={"font_size": 13, "color": 0xFFFFCC00})
+            labels["action"] = ui.Label("Wheels [FL, RL, FR, RR]: ---",
+                                        style={"font_size": 16, "color": 0xFFFFFFFF})
+
+    return window, labels
+
 
 def main():
-    # 1. Setup Env
+    # --- 3. Environment Setup ---
     env_cfg = EnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
-    
-    # Apply Curriculum Weights
-    env_cfg.rewards["tracking"].weight = args_cli.tracking_weight
-    env_cfg.rewards["alignment"].weight = args_cli.alignment_weight
-    env_cfg.rewards["success"].weight = args_cli.success_weight
-    env_cfg.rewards["collision"].weight = args_cli.collision_weight
-    
-    # Force enable cameras if video recording is requested
-    if args_cli.video:
-        args_cli.enable_cameras = True
-        
-    env = ManagerBasedRLEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-    
-    # Wrap environment for video recording if requested
-    if args_cli.video:
-        video_dir = os.path.join(os.path.dirname(__file__), "videos")
-        print(f"Recording evaluation video to: {video_dir}")
-        env = gym.wrappers.RecordVideo(env, video_dir, step_trigger=lambda step: step == 0, video_length=500)
-    
-    # 2. Setup Model
-    state_dim = 28
-    action_dim = 2
-    
-    ppo_agent = PPO(state_dim, action_dim, lr=0.001, gamma=0.99, K_epochs=4, eps_clip=0.2)
-    
-    # Load Checkpoint
-    checkpoint_path = args_cli.checkpoint
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        ppo_agent.policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded checkpoint from: {checkpoint_path} (Step: {checkpoint.get('step', 'unknown')})")
+    env_cfg.scene.lidar.debug_vis = True
+
+    env = ManagerBasedRLEnv(cfg=env_cfg)
+    env = Sb3VecEnvWrapper(env)
+
+    # --- 4. Model Setup ---
+    policy_kwargs = dict(activation_fn=torch.nn.ReLU, net_arch=dict(pi=[128, 32], vf=[128, 32]))
+
+    if args_cli.checkpoint is None:
+        print("WARNING: No checkpoint provided. Running with RANDOM WEIGHTS.")
+        model = PPO("MlpPolicy", env, device="cuda", policy_kwargs=policy_kwargs)
+    elif args_cli.checkpoint.endswith(".pt"):
+        print(f"Loading raw PyTorch weights from: {args_cli.checkpoint}")
+        model = PPO("MlpPolicy", env, device="cuda", policy_kwargs=policy_kwargs)
+        checkpoint = torch.load(args_cli.checkpoint, map_location="cuda")
+        state_dict = checkpoint["policy_state_dict"] if "policy_state_dict" in checkpoint else checkpoint
+        model.policy.load_state_dict(state_dict)
     else:
-        print(f"Error: Checkpoint not found at {checkpoint_path}")
-        simulation_app.close()
-        return
+        print(f"Loading SB3 checkpoint: {args_cli.checkpoint}")
+        model = PPO.load(args_cli.checkpoint, env=env, device="cuda")
 
-    # Set policy to evaluation mode to disable exploratory dropout/noise
-    ppo_agent.policy.eval()
+    # --- 5. UI Setup ---
+    # IMPORTANT: hold 'debug_window' here so it is NOT garbage collected.
+    debug_window, lbl = build_ui()
 
-    # 3. Evaluation Loop
-    obs, _ = env.reset()
-    current_obs = obs["policy"] # Shape: [num_envs, 28]
-    current_obs = torch.nan_to_num(current_obs, nan=0.0, posinf=1.0, neginf=-1.0)
+    # --- 6. Simulation Start ---
+    omni.timeline.get_timeline_interface().play()
+    simulation_app.update()  # Prime the app so is_running() returns True
 
-    print("Starting evaluation loop...")
-    
-    # 3.5 Setup Debug UI Overlay Native to Isaac Sim
-    import omni.ui as ui
-    window = ui.Window("NN Input Debugger", width=400, height=500, visible=True)
-    with window.frame:
-        with ui.VStack():
-            ui.Label("NEURAL NETWORK INPUT TENSOR", style={"font_size": 20, "color": 0xFF00FF00})
-            ui.Spacer(height=10)
-            lbl_imu = ui.Label("IMU Input [X-Vel, Yaw-Vel]:", style={"font_size": 16})
-            lbl_target = ui.Label("Target Input [Local-X, Local-Y]:", style={"font_size": 16})
-            lbl_lidar_hdr = ui.Label("Lidar Inputs (24 Rays Normalize [0-1]):", style={"font_size": 16})
-            lbl_lidar = ui.Label("", style={"font_size": 12})
-    
+    obs = env.reset()        # Sb3VecEnvWrapper already returns plain numpy (num_envs, obs_dim)
+    print(f"[eval] obs shape: {obs.shape}  |  dtype: {obs.dtype}")
+    print("[eval] Entering loop. Press Ctrl+C to stop.")
+
+    count = 0
     while simulation_app.is_running():
-        # --- Update HUD ---
-        # Get the first environment's observation vector
-        obs_vec = current_obs[0].cpu().numpy()
-        lbl_imu.text = f"IMU Input [X-Vel, Yaw-Vel]: [{obs_vec[0]:.3f}, {obs_vec[1]:.3f}]"
-        lbl_target.text = f"Target Input [Local-X, Local-Y]: [{obs_vec[2]:.3f}, {obs_vec[3]:.3f}]"
-        # Format the 24 lidar rays into a grid string
-        lidar_str = ""
-        for i in range(4, 28):
-            lidar_str += f"{obs_vec[i]:.2f}  "
-            if (i - 4 + 1) % 6 == 0:
-                lidar_str += "\n"
-        lbl_lidar.text = lidar_str
-        
-        with torch.no_grad():
-            # For evaluation, we directly output the mean action (deterministic) 
-            # rather than using sample_action to prevent exploratory noise.
-            action_mean, _ = ppo_agent.policy(current_obs)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
+        v = obs[0]  # (obs_dim,) for env 0
 
-        # Enforce action limits
-        nn_actions = torch.clamp(action_mean, -1.0, 1.0)
-        
-        # --- Map 2 Outputs to 4 Wheels ---
-        left_cmd = nn_actions[:, 0].unsqueeze(1)  # Shape [N, 1]
-        right_cmd = nn_actions[:, 1].unsqueeze(1) # Shape [N, 1]
-        env_actions = torch.cat([left_cmd, right_cmd, left_cmd, right_cmd], dim=1)
-        
-        # --- Step Environment ---
-        obs, rewards, terms, truncs, infos = env.step(env_actions)
-        
-        # If environments terminate, they automatically reset in IsaacLab ManagerBasedRLEnv
-        # We just need to grab the new observations
-        current_obs = obs["policy"]
-        current_obs = torch.nan_to_num(current_obs, nan=0.0, posinf=1.0, neginf=-1.0)
-            
+        # --- Update UI labels via .text property ---
+        lbl["imu"].text    = f"IMU  [LinVel-X, YawRate]:  {v[0]:+.3f}  {v[1]:+.3f}"
+        lbl["target"].text = f"Goal [Dist-norm, Angle]:   {v[2]:+.3f}  {v[3]:+.3f}"
+
+        rays = v[4:]   # 23 lidar rays
+        cols = 6
+        rows = [rays[i : i + cols] for i in range(0, len(rays), cols)]
+        lbl["lidar"].text = "\n".join("  ".join(f"{x:.2f}" for x in row) for row in rows)
+
+        actions, _ = model.predict(obs, deterministic=True)
+        lbl["action"].text = (
+            f"Skid-steer  [Left={actions[0,0]:+.2f}   Right={actions[0,1]:+.2f}]"
+        )
+
+        # --- Step ---
+        obs, rewards, dones, infos = env.step(actions)
+
+        # --- Flush UI + viewport (must be last) ---
+        simulation_app.update()
+
+        count += 1
+        if count % 100 == 0:
+            print(f"[eval] step={count:5d}  reward={rewards[0]:+.4f}  done={dones[0]}"
+                  f"  actions={np.round(actions[0], 3)}")
+
     env.close()
+    simulation_app.close()
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        print("\n====== EVAL CRASHED — FULL TRACEBACK ======")
+        traceback.print_exc()
+        print("===========================================\n")
+        sys.exit(1)

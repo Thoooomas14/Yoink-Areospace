@@ -5,7 +5,7 @@ from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
 from isaaclab.sensors import RayCasterCfg, patterns, ImuCfg
-from isaaclab.managers import SceneEntityCfg, ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg, EventTermCfg
+from isaaclab.managers import SceneEntityCfg, ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg, EventTermCfg, ActionTerm, ActionTermCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 import isaaclab.sim as sim_utils
 from isaaclab.sim.spawners.from_files.from_files_cfg import UrdfFileCfg
@@ -26,7 +26,7 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
         terrain_type="generator",
         terrain_generator=TerrainGeneratorCfg(
             seed=42,
-            size=(10.0, 10.0),
+            size=(20.0, 20.0),
             border_width=1.0,
             num_rows=1,
             num_cols=1,
@@ -38,15 +38,15 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
                     obstacle_height_mode="fixed",
                     obstacle_width_range=(0.5, 1.0),
                     obstacle_height_range=(0.4, 0.4),
-                    num_obstacles=20,
-                    platform_width=1.5,
+                    num_obstacles=40,
+                    platform_width=2.0,
                     flat_patch_sampling={
                         "init_pos": FlatPatchSamplingCfg(
                             num_patches=100,
-                            patch_radius=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                            patch_radius=[0.3, 0.4, 0.5],
                             max_height_diff=0.1,
-                            x_range=(-2.0, 2.0),
-                            y_range=(-2.0, 2.0),
+                            x_range=(-4.5, 4.5),
+                            y_range=(-4.5, 4.5),
                         ),
                         "target_pos": FlatPatchSamplingCfg(
                             num_patches=100,
@@ -91,7 +91,7 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
             )
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.05), # Ground level spawn to prevent dropping frames
+            pos=(0.0, 0.0, 0.1), # Ground level spawn to prevent dropping frames
         ),
         actuators={
             "wheels": ImplicitActuatorCfg(
@@ -99,7 +99,7 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
                 effort_limit_sim=20.0,
                 velocity_limit_sim=15.0,
                 stiffness=0.0,
-                damping=100.0,
+                damping=1.0,
             ),
         },
     )
@@ -121,33 +121,39 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
 
     # Obstacles are now procedurally baked into the static terrain mesh via HfDiscreteObstaclesTerrainCfg
 
-    # Lidar Sensor (25 samples, 360 degrees)
+    # Lidar Sensor (24 rays, 360 degrees)
     lidar = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.10, 0.06, 0.18)),
+        # Centered on Y-axis for symmetrical perception
+        offset=RayCasterCfg.OffsetCfg(pos=(0.10, 0.0, 0.18)), 
         ray_alignment="yaw",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=1, 
+            channels=1,
             vertical_fov_range=(0.0, 0.0),
             horizontal_fov_range=(0, 360),
-            horizontal_res=14.4, # Due to torch.linspace, 14.4 forces 25 points which yields exactly 24 rays spaced by 15.0 deg
+            horizontal_res=15.0, # 360 / 15 = 24 rays
         ),
         debug_vis=True, 
+        # Ensure this covers the terrain and baked obstacles
         mesh_prim_paths=["/World/ground"], 
+        max_distance=10.0, # Match your observation/reward scaling
     )
 
-    # Arduino Uno WiFi IMU Sensor
+    # IMU Sensor
     imu = ImuCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        # Adding a small offset if the Arduino isn't exactly at the center of mass
+        offset=ImuCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
     )
 
 # --- 2. Observation Functions ---
 def obs_current_pos(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     imu = env.scene[sensor_cfg.name]
-    # Use the simulated IMU sensor's onboard gyros to measure our forward and yaw velocities!
-    # This prepares the NN to natively accept the Arduino IMU's data stream in the real world.
-    lin_vel_x = imu.data.lin_vel_b[:, 0]  # Forward velocity in local frame
-    ang_vel_z = imu.data.ang_vel_b[:, 2]  # Yaw rate in local frame
+    # Normalise to [-1, 1] so all obs are in the same range for the NN.
+    # Max forward speed ~1.5 m/s (wheel vel_limit=15 rad/s * radius~0.1m).
+    # Max yaw rate ~3.0 rad/s (empirically safe upper bound for this rover).
+    lin_vel_x = torch.clamp(imu.data.lin_vel_b[:, 0] / 1.5, -1.0, 1.0)
+    ang_vel_z = torch.clamp(imu.data.ang_vel_b[:, 2] / 3.0, -1.0, 1.0)
     return torch.stack([lin_vel_x, ang_vel_z], dim=1)
 
 def obs_target_pos(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -157,39 +163,44 @@ def obs_target_pos(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.
     # 1. Get relative vector (Target - Robot) in World Frame
     target_vec_w = target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
     
-    # 2. Get Robot's Forward Vector in World Frame
+    # 2. Calculate Distance (r)
+    r = torch.norm(target_vec_w, dim=1)
+    
+    # 3. Calculate Angle to target in World Frame
+    target_yaw_w = torch.atan2(target_vec_w[:, 1], target_vec_w[:, 0])
+    
+    # 4. Get Robot's Current Yaw in World Frame from Quaternion
     quat = robot.data.root_quat_w
-    quat_w, quat_x, quat_y, quat_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    forward_x = 1.0 - 2.0 * (quat_y**2 + quat_z**2)
-    forward_y = 2.0 * (quat_x * quat_y + quat_w * quat_z)
+    qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    robot_yaw_w = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
     
-    # 3. Project Target Vector onto Robot's Local Axes (Ego-Centric Frame)
-    # Dot product with Forward Vector = Local X (Distance straight ahead)
-    local_x = target_vec_w[:, 0] * forward_x + target_vec_w[:, 1] * forward_y
-    # Dot product with Left Vector (-y, x) = Local Y (Distance to the left/right)
-    local_y = target_vec_w[:, 0] * (-forward_y) + target_vec_w[:, 1] * forward_x
+    # 5. Calculate Relative Heading (theta)
+    # This is the angle the robot needs to turn to face the target
+    theta = target_yaw_w - robot_yaw_w
     
-    # Return Target Position purely relative to the robot's nose!
-    return torch.stack([local_x, local_y], dim=1)
+    # Wrap angle to [-pi, pi] to keep the observation continuous
+    theta = torch.atan2(torch.sin(theta), torch.cos(theta))
+    
+    # Normalize r (assuming 10m max) and theta (divided by pi to get [-1, 1])
+    r_norm = torch.clamp(r / 10.0, 0.0, 1.0)
+    theta_norm = theta / math.pi
+    
+    return torch.stack([r_norm, theta_norm], dim=1)
 
 def obs_lidar(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     lidar = env.scene[sensor_cfg.name]
-    # ray_hits_w is [num_envs, num_rays, 3], we calculate norm for distance
-    # Or simpler: use ray_hits_w and subtract origin, but usually the 'distance' is derived or we assume hit.
-    # For RayCaster, Isaac Lab usually provides 'data.ray_hits_w'. 
-    # We compute distance manually to be safe:
-    origins = lidar.data.pos_w # [num_envs, 3]
-    hits = lidar.data.ray_hits_w # [num_envs, 24, 3]
+    origins = lidar.data.pos_w 
+    hits = lidar.data.ray_hits_w 
     
-    # Calculate Euclidean distance
-    # Expand origins to [num_envs, 1, 3] to broadcast
+    # Calculate Euclidean distance [num_envs, num_rays]
     dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
     
-    # Handle misses (Isaac Lab puts missed rays at max_distance, usually 1e6 meters out)
-    # This blows up Neural Network weights instantly.
-    # We clip it to 10.0 meters and normalize to [0, 1]
-    dists = torch.clamp(dists, 0.0, 10.0)
-    normalized_dists = dists / 10.0
+    # Clip to 10.0m max to ensure the observation stays within [0, 1]
+    # This also handles 'infinite' rays that don't hit anything.
+    dists_clipped = torch.clamp(dists, 0.0, 10.0)
+    
+    # Linear scale: 0m -> 0.0, 10m -> 1.0
+    normalized_dists = dists_clipped / 10.0
     
     return normalized_dists
 
@@ -198,107 +209,38 @@ def rew_distance(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: 
     robot = env.scene[robot_cfg.name]
     target = env.scene[target_cfg.name]
     
-    # Vector from robot to target
-    target_vec_w = target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
-    target_dist = torch.norm(target_vec_w, dim=1)
+    target_dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
     
-    # Unit direction vector pointing perfectly at target
-    target_dir_w = target_vec_w / (target_dist.unsqueeze(1) + 1e-6)
+    max_dist = 10*math.sqrt(2)  # Max distance in a 10x10m arena (diagonal)
+    norm_dist = torch.clamp(target_dist / max_dist, 0.0, 1.0)
     
-    # Robot's actual linear velocity in the world frame [x, y]
-    robot_vel_w = robot.data.root_lin_vel_w[:, :2]
-    
-    # Dot product: This IS mathematically the rate at which distance to the target is decreasing!
-    vel_towards_target = torch.sum(robot_vel_w * target_dir_w, dim=1)
-    
-    # Get Robot's forward direction to check if it's facing the target
-    quat = robot.data.root_quat_w
-    quat_w, quat_x, quat_y, quat_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    forward_x = 1.0 - 2.0 * (quat_y**2 + quat_z**2)
-    forward_y = 2.0 * (quat_x * quat_y + quat_w * quat_z)
-    robot_dir = torch.stack([forward_x, forward_y], dim=1)
-    
-    alignment = torch.sum(target_dir_w * robot_dir, dim=1)
-    
-    # Only reward the robot for decreasing the distance IF its nose is pointed within ~60 degrees of the target.
-    # If it tries to spiral at 85 degrees, alignment is ~0.08, so it earns $0.0 for the distance decrease!
-    return torch.where(alignment > 0.5, vel_towards_target, 0.0)
+    # +1.0 when within 0.3m. Note: this triggers for the final step of the episode.
+    bonus = (target_dist < 0.3).float()
 
-def rew_success(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
-    robot = env.scene[robot_cfg.name]
-    target = env.scene[target_cfg.name]
-    
-    # Calculate horizontal distance to target
-    dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
-    
-    # Calculate rover's linear speed
-    speed = torch.norm(robot.data.root_lin_vel_w[:, :2], dim=1)
-    
-    # 1. Proximity Gradient: Scale reward linearly starting from 0.4m away, reaching max 1.0 at 0.0m
-    dist_clamped = torch.clamp(dist, 0.0, 0.4)
-    proximity_reward = (0.4 - dist_clamped) / 0.4
-    
-    # 2. Stationary Bonus: Massive 2.0 multiplier bonus if the robot hits the brakes (< 0.1 m/s) while parked inside target area
-    in_zone = dist < 0.1
-    is_still = speed < 0.1
-    stationary_bonus = torch.where(in_zone & is_still, 2.0, 0.0)
-    
-    # Return gradient reward + stationary bonus
-    return proximity_reward + stationary_bonus
+    return bonus - norm_dist
 
 def rew_collision(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
-    # Use Lidar to calculate proximity penalty based on actual perception!
     lidar = env.scene["lidar"]
     origins = lidar.data.pos_w
     hits = lidar.data.ray_hits_w
-    dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
-    dists = torch.clamp(dists, 0.0, 10.0)
-    
-    # Minimum distance sensed on any ray
-    min_dist = torch.min(dists, dim=1)[0]
-    
-    # surface_dist is distance from robot chassis edge (approx 0.2m radius) to rock surface
-    surface_dist = torch.clamp(min_dist - 0.2, 0.0, 10.0)
-    
-    # Starts penalizing exactly when breaching the 30cm safety bubble.
-    # Linearly scales up to a 1.0 penalty if it physically hits the rock (0.0m)
-    proximity_penalty = (0.3 - surface_dist) / 0.3
-    
-    return torch.clamp(proximity_penalty, 0.0, 1.0)
 
-def rew_alignment(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
+    dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
+    min_dist = torch.min(dists, dim=1)[0]
+
+    max_sensor_range = 10.0
+    norm_obs_dist = torch.clamp(min_dist / max_sensor_range, 0.0, 1.0)
+    
+    # Penalty 'spike' for breaching the 0.3m safety zone
+    penalty = (min_dist < 0.3).float()
+
+    # Range: 0.0 (Safe) to -2.0 (Collision)
+    return -(1.0 - norm_obs_dist) - penalty
+
+def terminate_success(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
     robot = env.scene[robot_cfg.name]
     target = env.scene[target_cfg.name]
-    
-    # Vector from robot to target
-    target_vec = target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
-    target_dist = torch.norm(target_vec, dim=1)
-    target_dir = target_vec / (target_dist.unsqueeze(1) + 1e-5)
-    
-    # Robot forward direction (assuming X is forward in local frame)
-    # We can get this from the quaternion or just use root_forward_w if available
-    # Isaac Lab's RigidObjectData usually has root_quat_w
-    # A simple way to get heading in 2D from quat (w, x, y, z):
-    # heading = atan2(2*(w*z + x*y), 1 - 2*(y**2 + z**2))
-    # Or more directly, transform the local +X vector (1, 0, 0) by the quaternion
-    # Isaac Lab provides `data.projected_gravity_b` or similar, but we can compute forward:
-    
-    # We can use the math utility or manually compute.
-    # To keep dependencies minimal:
-    quat = robot.data.root_quat_w
-    # q = [w, x, y, z] -> forward vector is primarily the first column of the rotation matrix
-    # vx = 1 - 2*(y^2 + z^2), vy = 2*(x*y + w*z)
-    quat_w, quat_x, quat_y, quat_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    forward_x = 1.0 - 2.0 * (quat_y**2 + quat_z**2)
-    forward_y = 2.0 * (quat_x * quat_y + quat_w * quat_z)
-    
-    robot_dir = torch.stack([forward_x, forward_y], dim=1)
-    
-    # Dot product gives the cosine of the angle between them
-    alignment = torch.sum(target_dir * robot_dir, dim=1)
-    
-    # Reward positive alignment (facing target)
-    return alignment
+    target_dist = torch.norm(target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1)
+    return target_dist < 0.3
 
 @configclass
 class ObservationsCfg:
@@ -347,15 +289,68 @@ def reset_target_state_from_terrain(
     asset.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
     asset.write_root_velocity_to_sim(velocities, env_ids=env_ids)
 
+
+# --- Custom Skid-Steer Action ---
+# The real rover has FL+RL wired to one motor driver and FR+RR to another.
+# This action term maps 2 NN outputs [left, right] to 4 joints by broadcasting,
+# so the simulation exactly matches the physical hardware constraint.
+class SkidSteerAction(ActionTerm):
+    """2-input action term: [left_throttle, right_throttle].
+    FL and RL always receive the same velocity command.
+    FR and RR always receive the same velocity command.
+    """
+    cfg: "SkidSteerActionCfg"
+
+    def __init__(self, cfg: "SkidSteerActionCfg", env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        # Resolve indices: left=[FL, RL], right=[FR, RR]
+        left_ids,  _ = self._asset.find_joints(["joint_fl", "joint_rl"])
+        right_ids, _ = self._asset.find_joints(["joint_fr", "joint_rr"])
+        # Store combined order for a single set_joint_velocity_target call
+        self._joint_ids = left_ids + right_ids  # [FL, RL, FR, RR]
+        # Buffers
+        self._raw_actions       = torch.zeros(env.num_envs, 2, device=env.device)
+        self._processed_actions = torch.zeros(env.num_envs, 2, device=env.device)
+
+    @property
+    def action_dim(self) -> int:
+        return 2  # [left, right]
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = actions.clone()
+        self._processed_actions = actions * self.cfg.scale
+
+    def apply_actions(self):
+        left  = self._processed_actions[:, 0:1]  # (num_envs, 1)
+        right = self._processed_actions[:, 1:2]  # (num_envs, 1)
+        # Broadcast: columns = [FL, RL, FR, RR]
+        vel = torch.cat([left, left, right, right], dim=1)  # (num_envs, 4)
+        self._asset.set_joint_velocity_target(vel, joint_ids=self._joint_ids)
+
+
+@configclass
+class SkidSteerActionCfg(ActionTermCfg):
+    class_type: type = SkidSteerAction
+    asset_name: str = "robot"
+    scale: float = 15.0
+
+
 # --- 4. Environment Config ---
 @configclass
 class ActionsCfg:
-    """Action specifications for the environment."""
-    wheels: mdp.JointVelocityActionCfg = mdp.JointVelocityActionCfg(
-        asset_name="robot",
-        joint_names=["joint_fl", "joint_fr", "joint_rl", "joint_rr"],
-        scale=10.0,
-    )
+    """2-action skid-steer: [left_throttle, right_throttle].
+    Both wheels on each side are always coupled to the same command.
+    """
+    wheels = SkidSteerActionCfg()
 
 @configclass
 class EnvCfg(ManagerBasedRLEnvCfg):
@@ -392,12 +387,11 @@ class EnvCfg(ManagerBasedRLEnvCfg):
     }
 
     rewards = {
-        "tracking": RewardTermCfg(func=rew_distance, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=3.0),
-        "alignment": RewardTermCfg(func=rew_alignment, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.0),
-        "success": RewardTermCfg(func=rew_success, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=5.0),
-        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")}, weight=-2.0),
+        "tracking": RewardTermCfg(func=rew_distance, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.8),
+        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")}, weight=0.2),
     }
     
     terminations = {
         "timeout": TerminationTermCfg(func=mdp.time_out),
+        "success": TerminationTermCfg(func=terminate_success, params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")})
     }
