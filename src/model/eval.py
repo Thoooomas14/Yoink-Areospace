@@ -11,6 +11,9 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Lynxmotion A4WD1 SB3 Evaluation with Live Debugging")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel environments")
 parser.add_argument("--checkpoint", type=str, help="Path to the SB3 checkpoint .zip file")
+parser.add_argument("--tracking_weight",  type=float, default=0.3)
+parser.add_argument("--progress_weight",  type=float, default=0.2)
+parser.add_argument("--collision_weight", type=float, default=0.5)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -54,11 +57,25 @@ def build_ui():
                                         style={"font_size": 11, "color": 0xFFCCCCCC,
                                                "word_wrap": True})
 
+            ui.Label("── LIDAR  (real metres) ──",
+                     style={"font_size": 12, "color": 0xFFAAAAAA})
+            labels["lidar_raw"] = ui.Label("---",
+                                            style={"font_size": 11, "color": 0xFFFFAA55,
+                                                   "word_wrap": True})
+
             ui.Line(style={"color": 0xFF555555})
             ui.Label("── ACTIONS ──",
                      style={"font_size": 13, "color": 0xFFFFCC00})
-            labels["action"] = ui.Label("Wheels [FL, RL, FR, RR]: ---",
+            labels["action"] = ui.Label("Skid-steer [Left, Right]: ---",
                                         style={"font_size": 16, "color": 0xFFFFFFFF})
+
+            ui.Line(style={"color": 0xFF555555})
+            ui.Label("── REWARDS ──",
+                     style={"font_size": 13, "color": 0xFFFF4444})
+            labels["rew_step"]    = ui.Label("Step  reward: ---",
+                                             style={"font_size": 13, "color": 0xFFFF8888})
+            labels["rew_episode"] = ui.Label("Episode sum: ---",
+                                             style={"font_size": 13, "color": 0xFFFF5555})
 
     return window, labels
 
@@ -66,6 +83,11 @@ def build_ui():
 def main():
     # --- 3. Environment Setup ---
     env_cfg = EnvCfg()
+    # Apply weights to config
+    env_cfg.rewards["tracking"].weight  = args_cli.tracking_weight
+    env_cfg.rewards["progress"].weight  = args_cli.progress_weight
+    env_cfg.rewards["collision"].weight = args_cli.collision_weight
+
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.scene.lidar.debug_vis = True
 
@@ -98,9 +120,11 @@ def main():
 
     obs = env.reset()        # Sb3VecEnvWrapper already returns plain numpy (num_envs, obs_dim)
     print(f"[eval] obs shape: {obs.shape}  |  dtype: {obs.dtype}")
+    
     print("[eval] Entering loop. Press Ctrl+C to stop.")
 
     count = 0
+    ep_return = 0.0  # running sum of rewards for the current episode
     while simulation_app.is_running():
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
         v = obs[0]  # (obs_dim,) for env 0
@@ -109,10 +133,12 @@ def main():
         lbl["imu"].text    = f"IMU  [LinVel-X, YawRate]:  {v[0]:+.3f}  {v[1]:+.3f}"
         lbl["target"].text = f"Goal [Dist-norm, Angle]:   {v[2]:+.3f}  {v[3]:+.3f}"
 
-        rays = v[4:]   # 23 lidar rays
+        rays = v[4:]   # 24 lidar rays (360° / 15° res)
         cols = 6
         rows = [rays[i : i + cols] for i in range(0, len(rays), cols)]
-        lbl["lidar"].text = "\n".join("  ".join(f"{x:.2f}" for x in row) for row in rows)
+        lbl["lidar"].text     = "\n".join("  ".join(f"{x:.2f}"       for x in row) for row in rows)
+        rows_m = [rays[i : i + cols] * 10.0 for i in range(0, len(rays), cols)]
+        lbl["lidar_raw"].text = "\n".join("  ".join(f"{x:.2f} m"    for x in row) for row in rows_m)
 
         actions, _ = model.predict(obs, deterministic=True)
         lbl["action"].text = (
@@ -121,6 +147,14 @@ def main():
 
         # --- Step ---
         obs, rewards, dones, infos = env.step(actions)
+
+        # --- Reward display ---
+        step_rew = float(rewards[0])
+        ep_return += step_rew
+        lbl["rew_step"].text    = f"Step  reward:  {step_rew:+.4f}"
+        lbl["rew_episode"].text = f"Episode sum:   {ep_return:+.4f}"
+        if dones[0]:
+            ep_return = 0.0  # reset accumulator for next episode
 
         # --- Flush UI + viewport (must be last) ---
         simulation_app.update()

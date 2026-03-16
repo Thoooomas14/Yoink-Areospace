@@ -15,8 +15,8 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Path to load a
 # Reward weights — must be POSITIVE. The reward functions themselves return
 # negative values for bad behaviour; the weight just scales the magnitude.
 parser.add_argument("--tracking_weight",  type=float, default=0.3)
-parser.add_argument("--progress_weight",  type=float, default=0.5)
-parser.add_argument("--collision_weight", type=float, default=0.2)
+parser.add_argument("--progress_weight",  type=float, default=0.2)
+parser.add_argument("--collision_weight", type=float, default=0.5)
 parser.add_argument("--save_interval", type=int, default=25_000_000,
                     help="Save checkpoint every N timesteps (default 25M ≈ 25 min at 17K fps)")
 

@@ -225,15 +225,10 @@ def rew_collision(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Te
     dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
     min_dist = torch.min(dists, dim=1)[0]
 
-    # Graded proximity penalty: zero when >= 1.0 m, ramps to -1.0 at 0.0 m.
-    # Squaring gives a steeper curve close-in so the agent really avoids walls,
-    # while not penalising normal open-field navigation at all.
-    proximity_penalty = torch.clamp(1.0 - min_dist / 1.0, 0.0, 1.0) ** 2
+    proximity_penalty = torch.clamp(1.4 - min_dist, 0.0, 1.0)
 
-    # Hard spike the moment the robot breaches the 0.3 m safety zone
-    hard_penalty = (min_dist < 0.3).float()
+    hard_penalty = (min_dist < 0.4).float() * 5.0
 
-    # Range: 0.0 (Safe, > 1 m clearance) to -2.0 (Contact)
     return -proximity_penalty - hard_penalty
 
 
@@ -245,20 +240,13 @@ def rew_progress(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: 
         target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1
     )
 
-    # Buffer is seeded by reset_progress_buffer event before each episode.
-    # The hasattr guard is a safety net for the very first environment step.
     if not hasattr(env, "_rew_progress_prev_dist"):
         env._rew_progress_prev_dist = current_dist.clone()
 
-    # Positive = got closer this step, negative = moved away
     progress = env._rew_progress_prev_dist - current_dist
     env._rew_progress_prev_dist = current_dist.clone()
 
-    # Only penalise moving away from the target; approaching returns 0.
-    # Combined with rew_distance (which pulls the agent toward the goal),
-    # this keeps all rewards <= 0 so the agent is never rewarded for
-    # merely staying alive.
-    return torch.clamp(progress / 0.1, -1.0, 0.0)
+    return torch.clamp(progress / 0.1, 0.0, 1.0) - 1.0
 
 def reset_progress_buffer(
     env: ManagerBasedRLEnv,
@@ -447,9 +435,9 @@ class EnvCfg(ManagerBasedRLEnvCfg):
         # Absolute distance penalty — keeps a long-range pull toward the target
         "tracking":  RewardTermCfg(func=rew_distance,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.3),
         # Delta-distance reward — dominant signal, breaks obstacle deadlocks
-        "progress":  RewardTermCfg(func=rew_progress,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.5),
-        # Graded proximity penalty — zero in open space, ramps in < 1 m
-        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")},                                         weight=0.2),
+        "progress":  RewardTermCfg(func=rew_progress,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.2),
+        # Graded proximity penalty — zero in open space, ramps in < 1.4 m
+        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")},                                         weight=0.5),
     }
     
     terminations = {
