@@ -14,7 +14,8 @@ parser.add_argument("--max_steps", type=int, default=1000000, help="Total timest
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to load a model to resume training")
 # Reward weights — must be POSITIVE. The reward functions themselves return
 # negative values for bad behaviour; the weight just scales the magnitude.
-parser.add_argument("--tracking_weight",  type=float, default=0.8)
+parser.add_argument("--tracking_weight",  type=float, default=0.3)
+parser.add_argument("--progress_weight",  type=float, default=0.5)
 parser.add_argument("--collision_weight", type=float, default=0.2)
 parser.add_argument("--save_interval", type=int, default=25_000_000,
                     help="Save checkpoint every N timesteps (default 25M ≈ 25 min at 17K fps)")
@@ -68,7 +69,8 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
 
     # Apply weights to config
-    env_cfg.rewards["tracking"].weight = args_cli.tracking_weight
+    env_cfg.rewards["tracking"].weight  = args_cli.tracking_weight
+    env_cfg.rewards["progress"].weight  = args_cli.progress_weight
     env_cfg.rewards["collision"].weight = args_cli.collision_weight
 
     # Create the environment
