@@ -28,8 +28,8 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
             seed=42,
             size=(20.0, 20.0),
             border_width=1.0,
-            num_rows=1,
-            num_cols=1,
+            num_rows=1, # Default: can be overridden by training scripts
+            num_cols=1, # Default: can be overridden by training scripts
             horizontal_scale=0.1,
             vertical_scale=0.001,
             sub_terrains={
@@ -59,7 +59,7 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
                 ),
             },
         ),
-        max_init_terrain_level=0,
+        max_init_terrain_level=0, # Ensure sampling across all levels equally
         collision_group=-1,
         visual_material=sim_utils.MdlFileCfg(
             mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl",
@@ -213,9 +213,12 @@ def rew_distance(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: 
     
     max_dist = 10*math.sqrt(2)  # Max distance in a 10x10m arena (diagonal)
     norm_dist = torch.clamp(target_dist / max_dist, 0.0, 1.0)
+
+    # Success bonus: +5.0 when within 0.3m.
+    bonus = (target_dist < 0.3).float() * 5.0
     
-    # Pure cost: 0.0 at goal, -1.0 at maximum range.
-    return -norm_dist
+    # Distance cost: 0.0 at goal, -1.0 at maximum range.
+    return -norm_dist + bonus
 
 def rew_collision(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
     lidar = env.scene["lidar"]
@@ -225,56 +228,23 @@ def rew_collision(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Te
     dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
     min_dist = torch.min(dists, dim=1)[0]
 
-    proximity_penalty = torch.clamp(1.4 - min_dist, 0.0, 1.0)
+    # Proximity penalty: 0.0 at 0.6m, ramps to -1.0 at 0.3m.
+    proximity_penalty = torch.clamp((0.6 - min_dist) / 0.3, 0.0, 1.0)
 
-    hard_penalty = (min_dist < 0.4).float() * 5.0
+    # Hard penalty: -1.0 for very close proximity (< 0.3m).
+    hard_penalty = (min_dist < 0.3).float() * 1.0
 
     return -proximity_penalty - hard_penalty
 
-
-def rew_progress(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
-    robot = env.scene[robot_cfg.name]
-    target = env.scene[target_cfg.name]
-
-    current_dist = torch.norm(
-        target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1
-    )
-
-    if not hasattr(env, "_rew_progress_prev_dist"):
-        env._rew_progress_prev_dist = current_dist.clone()
-
-    progress = env._rew_progress_prev_dist - current_dist
-    env._rew_progress_prev_dist = current_dist.clone()
-
-    return torch.clamp(progress / 0.1, 0.0, 1.0) - 1.0
-
-def reset_progress_buffer(
-    env: ManagerBasedRLEnv,
-    env_ids: torch.Tensor,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
-):
-    """Re-seed the rew_progress distance buffer for the envs being reset.
-
-    Must be registered AFTER reset_robot and reset_target in the events dict
-    so that root_pos_w already reflects the new episode's starting positions.
-    This guarantees the very first reward step of each episode returns ~0.0
-    progress instead of a large spike caused by the teleport.
-    """
-    robot = env.scene[robot_cfg.name]
-    target = env.scene[target_cfg.name]
-
-    current_dist = torch.norm(
-        target.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=1
-    )
-
-    if not hasattr(env, "_rew_progress_prev_dist"):
-        # Very first call ever — initialise the full buffer
-        env._rew_progress_prev_dist = current_dist.clone()
-    else:
-        # Surgical update: only touch the envs that just reset
-        env._rew_progress_prev_dist[env_ids] = current_dist[env_ids]
-
+def rew_motion(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalizes sitting still. Returns -1.0 if velocity is 0, ramping to 0.0 at 0.1 sum velocity."""
+    imu = env.scene[sensor_cfg.name]
+    lin_vel = torch.abs(imu.data.lin_vel_b[:, 0])
+    ang_vel = torch.abs(imu.data.ang_vel_b[:, 2])
+    
+    sum_vel = lin_vel + ang_vel
+    
+    return torch.clamp((sum_vel - 0.5) / 0.5, -1.0, 0.0)
 
 def terminate_success(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: SceneEntityCfg) -> torch.Tensor:
     robot = env.scene[robot_cfg.name]
@@ -330,32 +300,38 @@ def reset_target_state_from_terrain(
     asset.write_root_velocity_to_sim(velocities, env_ids=env_ids)
 
 
-# --- Custom Skid-Steer Action ---
-# The real rover has FL+RL wired to one motor driver and FR+RR to another.
-# This action term maps 2 NN outputs [left, right] to 4 joints by broadcasting,
-# so the simulation exactly matches the physical hardware constraint.
-class SkidSteerAction(ActionTerm):
-    """2-input action term: [left_throttle, right_throttle].
-    FL and RL always receive the same velocity command.
-    FR and RR always receive the same velocity command.
+# --- 3. Custom Twist Action ---
+# Standard differential drive kinematics:
+# v_left  = (v - omega * L/2) / R
+# v_right = (v + omega * L/2) / R
+# L (track width) = 0.2775m
+# R (wheel radius) = 0.0625m
+class TwistAction(ActionTerm):
+    """2-input action term: [linear_velocity (v), angular_velocity (omega)].
+    Maps Twist commands to joint velocities in rad/s.
     """
-    cfg: "SkidSteerActionCfg"
+    cfg: "TwistActionCfg"
 
-    def __init__(self, cfg: "SkidSteerActionCfg", env: ManagerBasedRLEnv):
+    def __init__(self, cfg: "TwistActionCfg", env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         self._asset = env.scene[cfg.asset_name]
+        
         # Resolve indices: left=[FL, RL], right=[FR, RR]
         left_ids,  _ = self._asset.find_joints(["joint_fl", "joint_rl"])
         right_ids, _ = self._asset.find_joints(["joint_fr", "joint_rr"])
-        # Store combined order for a single set_joint_velocity_target call
         self._joint_ids = left_ids + right_ids  # [FL, RL, FR, RR]
+        
+        # Kinematic constants 
+        self._L = 0.2775
+        self._R = 0.0625
+        
         # Buffers
         self._raw_actions       = torch.zeros(env.num_envs, 2, device=env.device)
         self._processed_actions = torch.zeros(env.num_envs, 2, device=env.device)
 
     @property
     def action_dim(self) -> int:
-        return 2  # [left, right]
+        return 2  # [v, omega]
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -367,30 +343,36 @@ class SkidSteerAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = actions.clone()
-        self._processed_actions = actions * self.cfg.scale
+        # Scale to real-world units: v in m/s, omega in rad/s
+        self._processed_actions[:, 0] = actions[:, 0] * self.cfg.lin_scale
+        self._processed_actions[:, 1] = actions[:, 1] * self.cfg.ang_scale
 
     def apply_actions(self):
-        left  = self._processed_actions[:, 0:1]  # (num_envs, 1)
-        right = self._processed_actions[:, 1:2]  # (num_envs, 1)
-        # Broadcast: columns = [FL, RL, FR, RR]
-        vel = torch.cat([left, left, right, right], dim=1)  # (num_envs, 4)
+        v = self._processed_actions[:, 0:1]      # (num_envs, 1)
+        omega = self._processed_actions[:, 1:2]  # (num_envs, 1)
+        
+        # Differential Drive Kinematics (Units: rad/s)
+        v_left  = (v - omega * (self._L / 2.0)) / self._R
+        v_right = (v + omega * (self._L / 2.0)) / self._R
+        
+        # Broadcast to FL, RL, FR, RR
+        vel = torch.cat([v_left, v_left, v_right, v_right], dim=1)  # (num_envs, 4)
         self._asset.set_joint_velocity_target(vel, joint_ids=self._joint_ids)
 
 
 @configclass
-class SkidSteerActionCfg(ActionTermCfg):
-    class_type: type = SkidSteerAction
+class TwistActionCfg(ActionTermCfg):
+    class_type: type = TwistAction
     asset_name: str = "robot"
-    scale: float = 15.0
+    lin_scale: float = 2.0  # increased to 2.0 m/s for better authority
+    ang_scale: float = 3.14 # max ~180 deg/s (3.14 rad/s)
 
 
-# --- 4. Environment Config ---
 @configclass
 class ActionsCfg:
-    """2-action skid-steer: [left_throttle, right_throttle].
-    Both wheels on each side are always coupled to the same command.
+    """2-action twist: [linear_velocity, angular_velocity].
     """
-    wheels = SkidSteerActionCfg()
+    wheels = TwistActionCfg()
 
 @configclass
 class EnvCfg(ManagerBasedRLEnvCfg):
@@ -424,20 +406,15 @@ class EnvCfg(ManagerBasedRLEnvCfg):
                 "asset_cfg": SceneEntityCfg("target"),
             },
         ),
-        # Must come last so robot + target positions are already set for this episode
-        "reset_progress_buffer": EventTermCfg(
-            func=reset_progress_buffer,
-            mode="reset",
-        ),
     }
 
     rewards = {
         # Absolute distance penalty — keeps a long-range pull toward the target
-        "tracking":  RewardTermCfg(func=rew_distance,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.3),
-        # Delta-distance reward — dominant signal, breaks obstacle deadlocks
-        "progress":  RewardTermCfg(func=rew_progress,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.2),
+        "tracking":  RewardTermCfg(func=rew_distance,  params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")}, weight=0.6),
         # Graded proximity penalty — zero in open space, ramps in < 1.4 m
-        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")},                                         weight=0.5),
+        "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")},                                         weight=0.4),
+        # Motion penalty — prevents static local minima (curriculum only)
+        "motion":    RewardTermCfg(func=rew_motion,    params={"sensor_cfg": SceneEntityCfg("imu")},                                         weight=0.0),
     }
     
     terminations = {

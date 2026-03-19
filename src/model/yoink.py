@@ -7,7 +7,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 # Note: We don't need to define ActorCritic or RolloutBuffer classes anymore.
 # Stable Baselines3 handles these internally.
 
-def get_ppo_agent(env, lr=3e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99):
+def get_ppo_agent(env, lr=3e-4, n_steps=1024, batch_size=64, n_epochs=10, gamma=0.99):
     """
     Initializes a Stable Baselines3 PPO agent.
     
@@ -20,10 +20,12 @@ def get_ppo_agent(env, lr=3e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=
         gamma: Discount factor.
     """
     
-    # Policy keyword arguments to match your previous architecture (128 -> 32)
+    # Policy keyword arguments to match your new architecture (256 -> 128)
+    # Reduced log_std_init to -1.0 (std ~0.37) for more consistent exploration.
     policy_kwargs = dict(
         activation_fn=nn.ReLU,
-        net_arch=dict(pi=[128, 32], qf=[128, 32])
+        net_arch=dict(pi=[256, 128], vf=[256, 128]),
+        log_std_init=-1.0
     )
 
     model = PPO(

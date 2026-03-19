@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import math
 import numpy as np
 import torch
 import traceback
@@ -11,9 +12,9 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Lynxmotion A4WD1 SB3 Evaluation with Live Debugging")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel environments")
 parser.add_argument("--checkpoint", type=str, help="Path to the SB3 checkpoint .zip file")
-parser.add_argument("--tracking_weight",  type=float, default=0.3)
-parser.add_argument("--progress_weight",  type=float, default=0.2)
-parser.add_argument("--collision_weight", type=float, default=0.5)
+parser.add_argument("--tracking_weight",  type=float, default=0.2)
+parser.add_argument("--motion_weight",  type=float, default=0.4)
+parser.add_argument("--collision_weight", type=float, default=0.4)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -29,6 +30,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
 from src.model.isaac_env import EnvCfg
+from src.model.yoink import get_ppo_agent
 
 
 def build_ui():
@@ -64,10 +66,12 @@ def build_ui():
                                                    "word_wrap": True})
 
             ui.Line(style={"color": 0xFF555555})
-            ui.Label("── ACTIONS ──",
+            ui.Label("── ACTIONS / POLICY OUTPUT ──",
                      style={"font_size": 13, "color": 0xFFFFCC00})
-            labels["action"] = ui.Label("Skid-steer [Left, Right]: ---",
+            labels["action"] = ui.Label("Twist [v, omega]: ---",
                                         style={"font_size": 16, "color": 0xFFFFFFFF})
+            labels["action_raw"] = ui.Label("Policy Raw Output: [---, ---]",
+                                         style={"font_size": 11, "color": 0xFFAAAA00})
 
             ui.Line(style={"color": 0xFF555555})
             ui.Label("── REWARDS ──",
@@ -85,24 +89,30 @@ def main():
     env_cfg = EnvCfg()
     # Apply weights to config
     env_cfg.rewards["tracking"].weight  = args_cli.tracking_weight
-    env_cfg.rewards["progress"].weight  = args_cli.progress_weight
+    env_cfg.rewards["motion"].weight  = args_cli.motion_weight
     env_cfg.rewards["collision"].weight = args_cli.collision_weight
 
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.scene.lidar.debug_vis = True
 
+    # --- Terrain Diversity Calculation ---
+    # Aim for 16 robots per terrain patch
+    num_terrains = max(1, args_cli.num_envs // 16)
+    n_rows = int(math.sqrt(num_terrains))
+    n_cols = num_terrains // n_rows
+    env_cfg.scene.terrain.terrain_generator.num_rows = n_rows
+    env_cfg.scene.terrain.terrain_generator.num_cols = n_cols
+    print(f"[eval] Configuring terrain grid: {n_rows}x{n_cols} ({num_terrains} unique patches)")
+
     env = ManagerBasedRLEnv(cfg=env_cfg)
     env = Sb3VecEnvWrapper(env)
 
-    # --- 4. Model Setup ---
-    policy_kwargs = dict(activation_fn=torch.nn.ReLU, net_arch=dict(pi=[128, 32], vf=[128, 32]))
-
     if args_cli.checkpoint is None:
         print("WARNING: No checkpoint provided. Running with RANDOM WEIGHTS.")
-        model = PPO("MlpPolicy", env, device="cuda", policy_kwargs=policy_kwargs)
+        model = get_ppo_agent(env)
     elif args_cli.checkpoint.endswith(".pt"):
         print(f"Loading raw PyTorch weights from: {args_cli.checkpoint}")
-        model = PPO("MlpPolicy", env, device="cuda", policy_kwargs=policy_kwargs)
+        model = get_ppo_agent(env)
         checkpoint = torch.load(args_cli.checkpoint, map_location="cuda")
         state_dict = checkpoint["policy_state_dict"] if "policy_state_dict" in checkpoint else checkpoint
         model.policy.load_state_dict(state_dict)
@@ -140,10 +150,13 @@ def main():
         rows_m = [rays[i : i + cols] * 10.0 for i in range(0, len(rays), cols)]
         lbl["lidar_raw"].text = "\n".join("  ".join(f"{x:.2f} m"    for x in row) for row in rows_m)
 
+        # Policy prediction
         actions, _ = model.predict(obs, deterministic=True)
         lbl["action"].text = (
-            f"Skid-steer  [Left={actions[0,0]:+.2f}   Right={actions[0,1]:+.2f}]"
+            f"Twist  [v={actions[0,0]:+.2f}   omega={actions[0,1]:+.2f}]"
         )
+        # Show raw output from model before lin_scale/ang_scale
+        lbl["action_raw"].text = f"Policy [v_raw={actions[0,0]:+.3f}   w_raw={actions[0,1]:+.3f}]"
 
         # --- Step ---
         obs, rewards, dones, infos = env.step(actions)
