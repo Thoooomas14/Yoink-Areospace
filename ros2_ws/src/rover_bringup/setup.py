@@ -24,7 +24,6 @@ setup(
     entry_points={
         'console_scripts': [
             'lidar_bridge_node = rover_bringup.lidar_bridge_node:main',
-            'model_subscriber = rover_bringup.model_subscriber:main',
             'serial_bridge_node = rover_bringup.serial_bridge_node:main',
         ],
     },
