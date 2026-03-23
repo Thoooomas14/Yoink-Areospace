@@ -28,8 +28,8 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
             seed=42,
             size=(20.0, 20.0),
             border_width=1.0,
-            num_rows=1, # Default: can be overridden by training scripts
-            num_cols=1, # Default: can be overridden by training scripts
+            num_rows=1, 
+            num_cols=1, 
             horizontal_scale=0.1,
             vertical_scale=0.001,
             sub_terrains={
@@ -214,8 +214,8 @@ def rew_distance(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, target_cfg: 
     max_dist = 10*math.sqrt(2)  # Max distance in a 10x10m arena (diagonal)
     norm_dist = torch.clamp(target_dist / max_dist, 0.0, 1.0)
 
-    # Success bonus: +5.0 when within 0.3m.
-    bonus = (target_dist < 0.3).float() * 5.0
+    # Success bonus: +15.0 when within 0.3m.
+    bonus = (target_dist < 0.3).float() * 15.0
     
     # Distance cost: 0.0 at goal, -1.0 at maximum range.
     return -norm_dist + bonus
@@ -228,8 +228,8 @@ def rew_collision(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Te
     dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
     min_dist = torch.min(dists, dim=1)[0]
 
-    # Proximity penalty: 0.0 at 0.6m, ramps to -1.0 at 0.3m.
-    proximity_penalty = torch.clamp((0.6 - min_dist) / 0.3, 0.0, 1.0)
+    # Proximity penalty: 0.0 at 1.2m, ramps to -1.0 at 0.3m.
+    proximity_penalty = torch.clamp((1.2 - min_dist) / 0.9, 0.0, 1.0)
 
     # Hard penalty: -1.0 for very close proximity (< 0.3m).
     hard_penalty = (min_dist < 0.3).float() * 1.0
@@ -414,7 +414,7 @@ class EnvCfg(ManagerBasedRLEnvCfg):
         # Graded proximity penalty — zero in open space, ramps in < 1.4 m
         "collision": RewardTermCfg(func=rew_collision, params={"robot_cfg": SceneEntityCfg("robot")},                                         weight=0.4),
         # Motion penalty — prevents static local minima (curriculum only)
-        "motion":    RewardTermCfg(func=rew_motion,    params={"sensor_cfg": SceneEntityCfg("imu")},                                         weight=0.0),
+        "motion":    RewardTermCfg(func=rew_motion,    params={"sensor_cfg": SceneEntityCfg("imu")},                                         weight=0.1),
     }
     
     terminations = {

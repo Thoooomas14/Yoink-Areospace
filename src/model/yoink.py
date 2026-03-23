@@ -7,7 +7,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 # Note: We don't need to define ActorCritic or RolloutBuffer classes anymore.
 # Stable Baselines3 handles these internally.
 
-def get_ppo_agent(env, lr=3e-4, n_steps=1024, batch_size=64, n_epochs=10, gamma=0.99):
+def get_ppo_agent(env, lr=3e-4, n_steps=1024, batch_size=64, n_epochs=10, gamma=0.99, ent_coef=0.0):
     """
     Initializes a Stable Baselines3 PPO agent.
     
@@ -18,6 +18,7 @@ def get_ppo_agent(env, lr=3e-4, n_steps=1024, batch_size=64, n_epochs=10, gamma=
         batch_size: Minibatch size.
         n_epochs: Number of epochs when optimizing the surrogate loss.
         gamma: Discount factor.
+        ent_coef: Entropy coefficient for the PPO agent.
     """
     
     # Policy keyword arguments to match your new architecture (256 -> 128)
@@ -36,6 +37,7 @@ def get_ppo_agent(env, lr=3e-4, n_steps=1024, batch_size=64, n_epochs=10, gamma=
         batch_size=batch_size,
         n_epochs=n_epochs,
         gamma=gamma,
+        ent_coef=ent_coef,
         policy_kwargs=policy_kwargs,
         verbose=1,
         device="cuda"

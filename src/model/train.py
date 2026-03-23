@@ -21,6 +21,9 @@ parser.add_argument("--collision_weight", type=float, default=0.35)
 parser.add_argument("--save_interval", type=int, default=25_000_000,
                     help="Save checkpoint every N timesteps")
 parser.add_argument("--curriculum", action="store_true", help="Enable automatic reward weight shifting")
+parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy coefficient for PPO")
+parser.add_argument("--reset_exploration", type=float, default=None, 
+                    help="Reset log_std to this value when resuming (e.g., -0.7 for more noise)")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -161,6 +164,18 @@ def main():
     if args_cli.checkpoint and os.path.exists(args_cli.checkpoint):
         print(f"Resuming training from: {args_cli.checkpoint}")
         model = PPO.load(args_cli.checkpoint, env=env, device="cuda")
+        
+        # Override entropy coefficient if provided
+        if args_cli.ent_coef is not None:
+            model.ent_coef = args_cli.ent_coef
+            print(f"[train] Overriding ent_coef to {args_cli.ent_coef}")
+            
+        # Reset exploration (log_std) if requested
+        if args_cli.reset_exploration is not None:
+            with torch.no_grad():
+                # For MlpPolicy, the log_std is a parameter of the policy
+                model.policy.log_std.fill_(args_cli.reset_exploration)
+            print(f"[train] Reset exploration log_std to {args_cli.reset_exploration}")
     else:
         print("Starting training from scratch.")
         model = get_ppo_agent(
@@ -169,7 +184,8 @@ def main():
             n_steps=1024,
             batch_size=32768,   
             n_epochs=10,        
-            gamma=0.99
+            gamma=0.99,
+            ent_coef=args_cli.ent_coef
         )
 
     # --- 5. Callbacks ---

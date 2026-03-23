@@ -33,6 +33,13 @@ from src.model.isaac_env import EnvCfg
 from src.model.yoink import get_ppo_agent
 
 
+# Global state for interactive target control
+TARGET_CONTROL_STATE = {
+    "pos": [0.0, 0.0, 0.2],  # default [x, y, z]
+    "needs_update": False
+}
+
+
 def build_ui():
     """Build the debug UI window.
     Returns (window, labels) — caller MUST hold 'window' reference or it gets GC'd.
@@ -80,6 +87,33 @@ def build_ui():
                                              style={"font_size": 13, "color": 0xFFFF8888})
             labels["rew_episode"] = ui.Label("Episode sum: ---",
                                              style={"font_size": 13, "color": 0xFFFF5555})
+
+            ui.Line(style={"color": 0xFF555555})
+            ui.Label("── MANUAL TARGET CONTROL ──",
+                     style={"font_size": 13, "color": 0xFFFF00FF})
+            
+            with ui.HStack(height=20):
+                ui.Label("Target X:", width=70)
+                x_slider = ui.FloatSlider(min=-7.0, max=7.0)
+                x_slider.model.set_value(TARGET_CONTROL_STATE["pos"][0])
+                def on_x_change(m):
+                    TARGET_CONTROL_STATE["pos"][0] = m.as_float
+                    TARGET_CONTROL_STATE["needs_update"] = True
+                x_slider.model.add_value_changed_fn(on_x_change)
+
+            with ui.HStack(height=20):
+                ui.Label("Target Y:", width=70)
+                y_slider = ui.FloatSlider(min=-7.0, max=7.0)
+                y_slider.model.set_value(TARGET_CONTROL_STATE["pos"][1])
+                def on_y_change(m):
+                    TARGET_CONTROL_STATE["pos"][1] = m.as_float
+                    TARGET_CONTROL_STATE["needs_update"] = True
+                y_slider.model.add_value_changed_fn(on_y_change)
+
+            def on_reset_btn():
+                TARGET_CONTROL_STATE["needs_update"] = "RANDOM"
+                
+            ui.Button("Force RANDOM Target Reset", clicked_fn=on_reset_btn, height=30)
 
     return window, labels
 
@@ -168,6 +202,38 @@ def main():
         lbl["rew_episode"].text = f"Episode sum:   {ep_return:+.4f}"
         if dones[0]:
             ep_return = 0.0  # reset accumulator for next episode
+
+        # --- Interactive Target Control Logic ---
+        # We access the underlying Isaac Lab environment via .unwrapped
+        base_env = env.unwrapped
+        target_asset = base_env.scene["target"]
+        
+        if TARGET_CONTROL_STATE["needs_update"] == "RANDOM":
+            # Trigger the standard random reset event for all envs
+            from src.model.isaac_env import reset_target_state_from_terrain
+            from isaaclab.managers import SceneEntityCfg
+            reset_target_state_from_terrain(base_env, torch.arange(base_env.num_envs, device=base_env.device),
+                                           pose_range={}, velocity_range={})
+            TARGET_CONTROL_STATE["needs_update"] = False
+            # Update the sliders state to match current pos (optional, but good for UI)
+            curr_pos = target_asset.data.root_pos_w[0]
+            TARGET_CONTROL_STATE["pos"][0] = curr_pos[0].item()
+            TARGET_CONTROL_STATE["pos"][1] = curr_pos[1].item()
+            # Note: We can't easily push these back to UI models without storing references to x_slider/y_slider.
+            # For now, it's enough to reset the internal state.
+
+        elif TARGET_CONTROL_STATE["needs_update"]:
+            target_pos = torch.zeros((base_env.num_envs, 7), device=base_env.device)
+            # Default root state + new XY
+            target_pos[:, :7] = target_asset.data.default_root_state[:, :7]
+            target_pos[:, 0] = TARGET_CONTROL_STATE["pos"][0]
+            target_pos[:, 1] = TARGET_CONTROL_STATE["pos"][1]
+            target_pos[:, 2] = TARGET_CONTROL_STATE["pos"][2]
+            
+            target_asset.write_root_pose_to_sim(target_pos, env_ids=torch.arange(base_env.num_envs, device=base_env.device))
+            target_asset.write_root_velocity_to_sim(torch.zeros((base_env.num_envs, 6), device=base_env.device), 
+                                                 env_ids=torch.arange(base_env.num_envs, device=base_env.device))
+            TARGET_CONTROL_STATE["needs_update"] = False
 
         # --- Flush UI + viewport (must be last) ---
         simulation_app.update()
