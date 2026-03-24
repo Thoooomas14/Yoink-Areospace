@@ -39,7 +39,7 @@ class YoinkInferenceNode(Node):
         self.get_logger().info("SB3 Model Loaded Successfully")
 
         # Publisher: Send actions (v, omega) to the Raspberry Pi
-        self.cmd_vel_pub = self.create_publisher(Twist, '/policy_actions', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, '/policy_action', 10)
 
         # Subscriber: Receive combined sensor data from the Raspberry Pi
         self.sensor_sub = self.create_subscription(
