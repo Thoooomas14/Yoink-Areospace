@@ -132,7 +132,7 @@ def main():
     if args_cli.curriculum:
         # Phase 1 & 2 use a single terrain pattern for stability
         print("[train] Curriculum active: Using SINGLE terrain pattern for stability.")
-        n_rows, n_cols = 1, 1
+        n_rows, n_cols = 3, 3
     else:
         # Aim for 128 robots per terrain patch
         num_terrains = max(1, args_cli.num_envs // 128)

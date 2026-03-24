@@ -61,10 +61,6 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
         ),
         max_init_terrain_level=0, # Ensure sampling across all levels equally
         collision_group=-1,
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path=f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Natural/Dirt.mdl",
-            project_uvw=True,
-        ),
     )
 
     # Mars-like lighting
@@ -121,22 +117,25 @@ class LynxmotionSceneCfg(InteractiveSceneCfg):
 
     # Obstacles are now procedurally baked into the static terrain mesh via HfDiscreteObstaclesTerrainCfg
 
-    # Lidar Sensor (24 rays, 360 degrees)
+    # Lidar Sensor (Standardized: 24 rays, 360 degrees)
+    # Ensure this produces exactly 24 rays to match total observation size of 28.
     lidar = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         # Centered on Y-axis for symmetrical perception
         offset=RayCasterCfg.OffsetCfg(pos=(0.10, 0.0, 0.18)), 
-        ray_alignment="yaw",
+        ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1,
             vertical_fov_range=(0.0, 0.0),
             horizontal_fov_range=(0, 360),
-            horizontal_res=15.0, # 360 / 15 = 24 rays
+            # Isaac Lab math: ceil(360/15.0)=24, linspace(0, 360, 24)[-1] -> leaves 23 points!
+            # Using 14.99: ceil(360/14.99)=25, linspace(0, 360, 25)[-1] -> leaves 24 points!
+            horizontal_res=14.99,
         ),
         debug_vis=True, 
         # Ensure this covers the terrain and baked obstacles
         mesh_prim_paths=["/World/ground"], 
-        max_distance=10.0, # Match your observation/reward scaling
+        max_distance=10.0, # Standardized for observation/reward scaling
     )
 
     # IMU Sensor
@@ -196,12 +195,9 @@ def obs_lidar(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tenso
     dists = torch.norm(hits - origins.unsqueeze(1), dim=-1)
     
     # Clip to 10.0m max to ensure the observation stays within [0, 1]
-    # This also handles 'infinite' rays that don't hit anything.
     dists_clipped = torch.clamp(dists, 0.0, 10.0)
-    
-    # Linear scale: 0m -> 0.0, 10m -> 1.0
     normalized_dists = dists_clipped / 10.0
-    
+
     return normalized_dists
 
 # --- 3. Rewards ---

@@ -44,36 +44,69 @@ def build_ui():
     """Build the debug UI window.
     Returns (window, labels) — caller MUST hold 'window' reference or it gets GC'd.
     """
-    window = ui.Window("Lynxmotion SB3 Debugger", width=440, height=500)
+    window = ui.Window("Lynxmotion SB3 Debugger", width=450, height=900)
     labels = {}
     with window.frame:
         with ui.VStack(spacing=8, style={"padding": 14}):
             ui.Label("LIVE SB3 NEURAL NETWORK I/O",
                      style={"font_size": 20, "color": 0xFF00FF00})
             ui.Line(style={"color": 0xFF555555})
-
-            ui.Label("── OBSERVATIONS ──",
+            ui.Label("--- OBSERVATIONS ---",
                      style={"font_size": 13, "color": 0xFF00AAFF})
             labels["imu"]    = ui.Label("IMU  [LinVel-X, YawRate]: ---",
                                         style={"font_size": 13, "color": 0xFFFFFFFF})
             labels["target"] = ui.Label("Goal [Dist-norm, Angle]:  ---",
                                         style={"font_size": 13, "color": 0xFFFFFFFF})
+            # Radar Display (Stabilized Local Version)
+            ui.Spacer(height=40)
+            ui.Label("--- LIDAR RADAR (Local-Forward) ---",
+                     style={"font_size": 13, "color": 0xFF00AAFF})
+            
+            with ui.HStack(height=260):
+                ui.Spacer()
+                with ui.ZStack(width=260, height=260):
+                    # 1. Background Disk
+                    with ui.Placer(offset_x=10, offset_y=10):
+                        ui.Circle(width=240, height=240, style={"background_color": 0xFF080808})
+                    
+                    # 2. Scale Rings and Crosshairs
+                    with ui.Placer(offset_x=10, offset_y=10):
+                        ui.Circle(width=240, height=240, style={"color": 0x44AAAAAA, "thickness": 1})
+                    with ui.Placer(offset_x=70, offset_y=70):
+                        ui.Circle(width=120, height=120, style={"color": 0x22888888, "thickness": 1})
+                    
+                    with ui.Placer(offset_x=10, offset_y=130):
+                        ui.Line(width=240, height=0, style={"color": 0x33888888})
+                    with ui.Placer(offset_x=130, offset_y=10):
+                        ui.Line(width=0, height=240, style={"color": 0x33888888})
+                    
+                    # 3. Lidar Detection Boundary (Stable Polyline)
+                    try:
+                        labels["radar_poly"] = ui.Polyline(points=[(130,130)]*2, 
+                                                            style={"color": 0x4400FF00, "thickness": 1})
+                    except:
+                        labels["radar_poly"] = None
 
-            ui.Spacer(height=4)
-            ui.Label("── LIDAR (0.0 = close, 1.0 = 10 m+) ──",
-                     style={"font_size": 12, "color": 0xFFAAAAAA})
-            labels["lidar"]  = ui.Label("---",
-                                        style={"font_size": 11, "color": 0xFFCCCCCC,
-                                               "word_wrap": True})
+                    # 4. Lidar Dots
+                    radar_dots = []
+                    for i in range(24):
+                        dp = ui.Placer(offset_x=127, offset_y=127)
+                        dp.visible = False
+                        with dp:
+                            ui.Circle(width=6, height=6, style={"background_color": 0xFF00FF00})
+                        radar_dots.append(dp)
+                    
+                    # 5. Robot Center (Facing Arrow)
+                    with ui.Placer(offset_x=128, offset_y=120):
+                        ui.Rectangle(width=4, height=10, style={"background_color": 0xFFAAAA00})
 
-            ui.Label("── LIDAR  (real metres) ──",
-                     style={"font_size": 12, "color": 0xFFAAAAAA})
-            labels["lidar_raw"] = ui.Label("---",
-                                            style={"font_size": 11, "color": 0xFFFFAA55,
-                                                   "word_wrap": True})
+                    labels["radar_dots"] = radar_dots
+                ui.Spacer()
+            ui.Spacer(height=40)
 
+            ui.Spacer(height=20)
             ui.Line(style={"color": 0xFF555555})
-            ui.Label("── ACTIONS / POLICY OUTPUT ──",
+            ui.Label("--- ACTIONS / POLICY OUTPUT ---",
                      style={"font_size": 13, "color": 0xFFFFCC00})
             labels["action"] = ui.Label("Twist [v, omega]: ---",
                                         style={"font_size": 16, "color": 0xFFFFFFFF})
@@ -81,7 +114,7 @@ def build_ui():
                                          style={"font_size": 11, "color": 0xFFAAAA00})
 
             ui.Line(style={"color": 0xFF555555})
-            ui.Label("── REWARDS ──",
+            ui.Label("--- REWARDS ---",
                      style={"font_size": 13, "color": 0xFFFF4444})
             labels["rew_step"]    = ui.Label("Step  reward: ---",
                                              style={"font_size": 13, "color": 0xFFFF8888})
@@ -89,7 +122,7 @@ def build_ui():
                                              style={"font_size": 13, "color": 0xFFFF5555})
 
             ui.Line(style={"color": 0xFF555555})
-            ui.Label("── MANUAL TARGET CONTROL ──",
+            ui.Label("--- MANUAL TARGET CONTROL ---",
                      style={"font_size": 13, "color": 0xFFFF00FF})
             
             with ui.HStack(height=20):
@@ -177,12 +210,49 @@ def main():
         lbl["imu"].text    = f"IMU  [LinVel-X, YawRate]:  {v[0]:+.3f}  {v[1]:+.3f}"
         lbl["target"].text = f"Goal [Dist-norm, Angle]:   {v[2]:+.3f}  {v[3]:+.3f}"
 
-        rays = v[4:]   # 24 lidar rays (360° / 15° res)
-        cols = 6
-        rows = [rays[i : i + cols] for i in range(0, len(rays), cols)]
-        lbl["lidar"].text     = "\n".join("  ".join(f"{x:.2f}"       for x in row) for row in rows)
-        rows_m = [rays[i : i + cols] * 10.0 for i in range(0, len(rays), cols)]
-        lbl["lidar_raw"].text = "\n".join("  ".join(f"{x:.2f} m"    for x in row) for row in rows_m)
+        # LiDAR Data Mapping (Environment now provides Local-Forward 24-ray vector)
+        rays = v[4:]
+        num_rays = len(rays)
+        poly_points = []
+        for i in range(24):
+            if i >= num_rays:
+                lbl["radar_dots"][i].visible = False
+                continue
+
+            # Native Local-Forward (CCW mapping where Index 0 is UP)
+            angle_rad = math.radians(i * (360.0 / max(1, num_rays)))
+            
+            dist = float(rays[i])
+            r_ui = dist * 110.0
+            
+            # CCW math: dx = -sin, dy = -cos (0 = UP)
+            dx = -math.sin(angle_rad) * r_ui
+            dy = -math.cos(angle_rad) * r_ui
+            
+            # Update Dot
+            lbl["radar_dots"][i].offset_x = 127 + dx
+            lbl["radar_dots"][i].offset_y = 127 + dy
+            lbl["radar_dots"][i].visible = True
+            
+            # Collect points for polyline boundary
+            poly_points.append((130 + dx, 130 + dy))
+
+        # Update Boundary Line
+        if poly_points and lbl["radar_poly"]:
+            poly_points.append(poly_points[0]) # close loop
+            lbl["radar_poly"].points = poly_points
+
+        # --- Lidar Diagnostics (Verify Localization & Rotation) ---
+        if count % 10 == 0:
+            base_env = env.unwrapped
+            robot = base_env.scene["robot"]
+            quat = robot.data.root_quat_w[0]
+            qw, qx, qy, qz = quat[0], quat[1], quat[2], quat[3]
+            robot_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
+            
+            sorted_indices = np.argsort(rays)[:3]
+            closest_info = ", ".join([f"idx={i}({rays[i]:.2f}m)" for i in sorted_indices])
+            print(f"[debug] Yaw: {math.degrees(robot_yaw):+.1f} | Closest: {closest_info} | NumRays: {num_rays}")
 
         # Policy prediction
         actions, _ = model.predict(obs, deterministic=True)
