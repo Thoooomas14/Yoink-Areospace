@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'lidar_bridge_node = rover_bringup.lidar_bridge_node:main',
             'serial_bridge_node = rover_bringup.serial_bridge_node:main',
+            'TESTinference = rover_bringup.TESTinfrence:main',
         ],
     },
 )

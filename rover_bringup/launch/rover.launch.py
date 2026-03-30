@@ -53,8 +53,8 @@ def generate_launch_description():
 
         Node(
             package='rover_bringup',
-            executable='model_subscriber',
-            name='model_subscriber',
+            executable='TESTinference',
+            name='test_inference',
             output='screen'
         ),
     ])
