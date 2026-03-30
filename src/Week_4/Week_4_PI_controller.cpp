@@ -6,7 +6,7 @@
 float integral = 0;
 float lastError = 0;
 
-// Variables to store angular rates from the gyro [degrees/s]
+// Variables to store angular rates from the gyro [rad/s]
 float omega_x = 0.0f, omega_y = 0.0f, omega_z = 0.0f;
 
 // Variables to store accelerations [g's]
@@ -24,17 +24,21 @@ float Ki_speed = 0.0f;
 float Kd_speed = 0.0f;
 
 
-float current_heading = 0.0; // Current robot angle in degrees
-float current_position = 0.0; // Current robot position in meters
+float current_heading = 0.0; // Current robot angle in radians
+float current_position = 0.0; // Distance traveled in the current leg [m]
+float current_x = 0.0f; // Estimated global x position [m]
+float current_y = 0.0f; // Estimated global y position [m]
 
 float targetSpeed = 0.0f;
 float targetRotation = 0.0f;
 
 unsigned long previousMicros = 0;
+const bool SERIAL_DEBUG = false;
+const size_t SERIAL_COMMAND_BUFFER_SIZE = 64;
+char serialCommandBuffer[SERIAL_COMMAND_BUFFER_SIZE];
+size_t serialCommandLength = 0;
 
-int state = 0;
 int count = 0;
-int DELAY = 0;
 // -------------------------------------------------------------- //
 // Encoder / wheel parameters (self-contained)
 // --- ENCODER PINS ---
@@ -142,15 +146,15 @@ float readSpeed() {
 
 // Function to read rotation rate from IMU
 float readRotationRate() {
-    // Read IMU gyroscope (if available) and update global omega_x/y/z with offsets
+    // Read IMU gyroscope (if available) and update global omega_x/y/z in rad/s
     if (IMU.gyroscopeAvailable()) {
         float gx = 0.0f, gy = 0.0f, gz = 0.0f;
         IMU.readGyroscope(gx, gy, gz);
 
-        // Apply previously computed offsets (from setup())
-        omega_x = gx + (float)X_offset;
-        omega_y = gy + (float)Y_offset;
-        omega_z = gz + (float)Z_offset;
+        // IMU outputs deg/s, so convert to rad/s after offset compensation.
+        omega_x = (gx + (float)X_offset) * DEG_TO_RAD;
+        omega_y = (gy + (float)Y_offset) * DEG_TO_RAD;
+        omega_z = (gz + (float)Z_offset) * DEG_TO_RAD;
 
         return omega_z;
     }
@@ -159,16 +163,84 @@ float readRotationRate() {
     return omega_z;
 }
 
+void sendStateArray(float linearVelocity, float angularVelocity) {
+    Serial.print(current_x, 6);
+    Serial.print(',');
+    Serial.print(current_y, 6);
+    Serial.print(',');
+    Serial.print(current_heading, 6);
+    Serial.print(',');
+    Serial.print(linearVelocity, 6);
+    Serial.print(',');
+    Serial.println(angularVelocity, 6);
+}
+
+bool parseTargetCommand(const char *command) {
+    char *parseEnd = nullptr;
+    float commandedLinearVelocity = strtof(command, &parseEnd);
+    if (parseEnd == command || *parseEnd != ',') {
+        return false;
+    }
+
+    char *angularStart = parseEnd + 1;
+    float commandedAngularVelocity = strtof(angularStart, &parseEnd);
+    if (parseEnd == angularStart) {
+        return false;
+    }
+
+    while (*parseEnd == ' ' || *parseEnd == '\t') {
+        parseEnd++;
+    }
+
+    if (*parseEnd != '\0') {
+        return false;
+    }
+
+    targetSpeed = commandedLinearVelocity;
+    targetRotation = commandedAngularVelocity;
+    return true;
+}
+
+void readTargetCommandFromSerial() {
+    while (Serial.available() > 0) {
+        char incoming = (char)Serial.read();
+
+        if (incoming == '\r') {
+            continue;
+        }
+
+        if (incoming == '\n') {
+            serialCommandBuffer[serialCommandLength] = '\0';
+
+            if (serialCommandLength > 0 && !parseTargetCommand(serialCommandBuffer) && SERIAL_DEBUG) {
+                Serial.print("Invalid command: ");
+                Serial.println(serialCommandBuffer);
+            }
+
+            serialCommandLength = 0;
+            continue;
+        }
+
+        if (serialCommandLength < (SERIAL_COMMAND_BUFFER_SIZE - 1)) {
+            serialCommandBuffer[serialCommandLength++] = incoming;
+        } else {
+            serialCommandLength = 0;
+        }
+    }
+}
+
 void setup() {
     // Open the serial port at 115200 bps
-    Serial.begin(57600);
+    Serial.begin(115200);
 
     // Wait for serial connection before starting
     while (!Serial) {
         delay(10);
     }
 
-    Serial.println();
+    if (SERIAL_DEBUG) {
+        Serial.println();
+    }
 
     // Check that the board is initialized
     if (!IMU.begin()) {
@@ -185,10 +257,12 @@ void setup() {
     g_f = IMU.gyroscopeSampleRate();
 
     // Print these values to the serial window
-    Serial.print("Accelerometer sample rate: ");
-    Serial.println(a_f);
-    Serial.print("Gyroscope sample rate: ");
-    Serial.println(g_f);
+    if (SERIAL_DEBUG) {
+        Serial.print("Accelerometer sample rate: ");
+        Serial.println(a_f);
+        Serial.print("Gyroscope sample rate: ");
+        Serial.println(g_f);
+    }
 
     float ox = 0.0f;
     float oy = 0.0f;
@@ -209,12 +283,14 @@ void setup() {
     Z_offset = -avgz / 1000.0;
 
     // Debug: print computed offsets
-    Serial.print("Gyro offsets (deg/s): ");
-    Serial.print(X_offset);
-    Serial.print(", ");
-    Serial.print(Y_offset);
-    Serial.print(", ");
-    Serial.println(Z_offset);
+    if (SERIAL_DEBUG) {
+        Serial.print("Gyro offsets (deg/s): ");
+        Serial.print(X_offset);
+        Serial.print(", ");
+        Serial.print(Y_offset);
+        Serial.print(", ");
+        Serial.println(Z_offset);
+    }
 
     // Initialize encoder pins
     pinMode(SIGNAL_A_L, INPUT);
@@ -245,11 +321,14 @@ void setup() {
     analogWrite(M_EA_R, 0);
 
     delay(1000); // Wait a moment before starting
-    
+    previousMicros = micros();
+
     // No shared t_last here; readSpeed uses its own internal timing
 }
 
 void loop() {
+    readTargetCommandFromSerial();
+
     unsigned long currentMicros = micros();
     // Guard against wrap-around or cleared counter, but mostly speed.
     // Use roughly 1ms minimum check if you want, but simply checking for 0 dt is faster.
@@ -263,55 +342,14 @@ void loop() {
     previousMicros = currentMicros;
     // Read sensors
     float speed = readSpeed(); // m/s
-    float rotationRate = readRotationRate(); // deg/s (gyro z)
+    float rotationRate = readRotationRate(); // rad/s (gyro z)
 
-    current_heading = fmod(current_heading + rotationRate * timestep, 360.0f); // Update heading
-    current_position += speed * timestep; // Update position
+    current_heading = atan2(sin(current_heading + rotationRate * timestep), cos(current_heading + rotationRate * timestep)); // Update heading
+    float distanceStep = speed * timestep;
+    current_position += distanceStep; // Update leg distance
 
-    switch (state)
-    {
-    case 0:
-        targetSpeed = 0.5f;
-        targetRotation = 0.0f;
-        if (current_position >= 1.0f) {
-            current_position = 0.0f; // reset for next leg
-            state = 1;
-            DELAY = 1;
-            integral_L = 0.0f;
-            lastError_L = 0.0f;
-            integral_R = 0.0f;
-            lastError_R = 0.0f;
-        }
-        break;
-    case 1:
-        targetRotation = 0.0f;
-        targetSpeed = 0.0f;
-        if (DELAY % 100 == 0) {
-            state = 2;
-            current_position = 0.0f;
-            current_heading = 0.0f;
-            DELAY = 0;
-            integral_L = 0.0f;
-            lastError_L = 0.0f;
-            integral_R = 0.0f;
-            lastError_R = 0.0f;
-        }
-        else {
-            DELAY ++;
-        }
-    break;
-    case 2:
-        targetSpeed = 0.0f;
-        targetRotation = 5.0f;
-        if (abs(abs(current_heading) - 160.0f) < 5.0f) { // within 5 degrees of target
-            current_heading = 0.0f; // snap to exact
-            current_position = 0.0f; // reset for next leg
-            state = 0;
-        }
-        break;
-    default:
-        break;
-    }
+    current_x += distanceStep * cos(current_heading);
+    current_y += distanceStep * sin(current_heading);
 
     // Calculate measured speeds for each wheel [m/s]
     float speed_L = (float)omega_L * (float)p;
@@ -326,17 +364,18 @@ void loop() {
     float control_L = PIDControlState(speed_L, target_speed_L, Kp_speed, Ki_speed, Kd_speed, integral_L, lastError_L, timestep);
     float control_R = PIDControlState(speed_R, target_speed_R, Kp_speed, Ki_speed, Kd_speed, integral_R, lastError_R, timestep);
 
-    if (count % 10 == 0) {
+    if (SERIAL_DEBUG && count % 10 == 0) {
         Serial.print("Error Left: "); Serial.print(target_speed_L - speed_L); Serial.print(" Error Right: "); Serial.print(target_speed_R - speed_R);
         Serial.print("Actual Left: "); Serial.print(speed_L); Serial.print(" Actual Right: "); Serial.println(speed_R);
         // Serial.print("Overall Target: "); Serial.print(targetSpeed); Serial.print(", "); Serial.print(speed); Serial.print(" | ");
         // Serial.print("Target Left: "); Serial.print(target_speed_L); Serial.print(" Actual Left: "); Serial.print(speed_L); Serial.print(" | ");
         // Serial.print("Target Right: "); Serial.print(target_speed_R); Serial.print(" Actual Right: "); Serial.println(speed_R); Serial.print(" | ");
-        // Serial.print("Position: "); Serial.print(current_position); Serial.print(" Heading: "); Serial.print(current_heading); Serial.print(" | ");
+        // Serial.print("Position: "); Serial.print(current_position); Serial.print(" X: "); Serial.print(current_x); Serial.print(" Y: "); Serial.print(current_y); Serial.print(" Heading: "); Serial.print(current_heading); Serial.print(" | ");
         // Serial.print("Control Left: "); Serial.print(control_L); Serial.print(" Control Right: "); Serial.println(control_R); Serial.print(" | ");
-        // Serial.print("State: "); Serial.println(state);
         count = 0;
     }
+
+    sendStateArray(speed, rotationRate);
 
     // Map PID outputs to motor PWM commands
     float speedToPWM = 100.0f;

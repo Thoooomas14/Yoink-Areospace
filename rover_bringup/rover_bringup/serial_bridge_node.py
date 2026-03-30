@@ -1,6 +1,7 @@
 import serial
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray
 
 
@@ -22,7 +23,7 @@ class SerialBridgeNode(Node):
         )
 
         self.action_subscription = self.create_subscription(
-            Float32MultiArray,
+            Twist,
             '/policy_action',
             self.action_callback,
             10
@@ -110,15 +111,9 @@ class SerialBridgeNode(Node):
             f'Published /features with {len(combined_features)} values'
         )
 
-    def action_callback(self, msg: Float32MultiArray):
-        action = list(msg.data)
-
-        if len(action) != 2:
-            self.get_logger().warn(f'Expected 2 action values, got {len(action)}')
-            return
-
-        linear_velocity = float(action[0])
-        angular_velocity = float(action[1])
+    def action_callback(self, msg: Twist):
+        linear_velocity = float(msg.linear.x)
+        angular_velocity = float(msg.angular.z)
         self.send_to_serial(linear_velocity, angular_velocity)
 
     def send_to_serial(self, linear_velocity, angular_velocity):
