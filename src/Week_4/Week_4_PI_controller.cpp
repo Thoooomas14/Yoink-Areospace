@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Arduino_LSM6DS3.h>
+#include <stdlib.h>
 
 // -------------------------------------------------------------- //
 // GLOBAL VARIABLES (IMU / PID state)
@@ -177,13 +178,13 @@ void sendStateArray(float linearVelocity, float angularVelocity) {
 
 bool parseTargetCommand(const char *command) {
     char *parseEnd = nullptr;
-    float commandedLinearVelocity = strtof(command, &parseEnd);
+    float commandedLinearVelocity = static_cast<float>(strtod(command, &parseEnd));
     if (parseEnd == command || *parseEnd != ',') {
         return false;
     }
 
     char *angularStart = parseEnd + 1;
-    float commandedAngularVelocity = strtof(angularStart, &parseEnd);
+    float commandedAngularVelocity = static_cast<float>(strtod(angularStart, &parseEnd));
     if (parseEnd == angularStart) {
         return false;
     }
