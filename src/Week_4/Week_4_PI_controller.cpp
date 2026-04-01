@@ -245,9 +245,10 @@ void setup() {
 
     // Check that the board is initialized
     if (!IMU.begin()) {
-        // Print an error message if the IMU is not ready
-        Serial.print("Failed to initialize IMU :(");
-        Serial.print("\n");
+        if (SERIAL_DEBUG) {
+            Serial.print("Failed to initialize IMU :(");
+            Serial.print("\n");
+        }
         while (1) {
             delay(10);
         }

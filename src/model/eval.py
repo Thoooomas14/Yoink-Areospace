@@ -252,7 +252,6 @@ def main():
             
             sorted_indices = np.argsort(rays)[:3]
             closest_info = ", ".join([f"idx={i}({rays[i]:.2f}m)" for i in sorted_indices])
-            print(f"[debug] Yaw: {math.degrees(robot_yaw):+.1f} | Closest: {closest_info} | NumRays: {num_rays}")
 
         # Policy prediction
         actions, _ = model.predict(obs, deterministic=True)

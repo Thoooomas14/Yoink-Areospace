@@ -1,4 +1,5 @@
 import serial
+import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -31,6 +32,11 @@ class SerialBridgeNode(Node):
 
         self.latest_lidar = None
         self.latest_serial_state = None
+        
+        # Diagnostics
+        self.last_reconnect_attempt = 0.0
+        self.last_wait_log = 0.0
+        self.reconnect_cooldown = 2.0 # seconds
 
         self.serial_port = '/dev/ttyACM0'
         self.baud_rate = 115200
@@ -63,8 +69,19 @@ class SerialBridgeNode(Node):
         self.publish_features()
 
     def read_serial_data(self):
+        # Attempt to reconnect if lost or failed at startup
         if self.ser is None:
-            return
+            now = time.time()
+            if now - self.last_reconnect_attempt < self.reconnect_cooldown:
+                return
+            
+            self.last_reconnect_attempt = now
+            try:
+                self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=1)
+                self.get_logger().info(f"Successfully reconnected to {self.serial_port}")
+            except Exception as e:
+                # Still failing, keep it None
+                return
 
         try:
             if self.ser.in_waiting <= 0:
@@ -78,27 +95,38 @@ class SerialBridgeNode(Node):
             parts = line.split(',')
 
             if len(parts) != 5:
-                self.get_logger().warn(f'Invalid serial data format: {line}')
+                # If we're getting text/debugging labels, just ignore them silently unless it persists
                 return
 
-            x_position = float(parts[0])
-            y_position = float(parts[1])
-            heading = float(parts[2])
-            linear_velocity = float(parts[3])
-            angular_velocity = float(parts[4])
-            self.latest_serial_state = [
-                x_position,
-                y_position,
-                heading,
-                linear_velocity,
-                angular_velocity,
-            ]
-            self.publish_features()
+            try:
+                x_position = float(parts[0])
+                y_position = float(parts[1])
+                heading = float(parts[2])
+                linear_velocity = float(parts[3])
+                angular_velocity = float(parts[4])
+                self.latest_serial_state = [
+                    x_position,
+                    y_position,
+                    heading,
+                    linear_velocity,
+                    angular_velocity,
+                ]
+                self.publish_features()
+            except ValueError:
+                # Handle cases where we get things like "Error: ..." or "IMU Failed"
+                return
         except Exception as e:
-            self.get_logger().error(f'Error reading serial data: {e}')
+            self.get_logger().debug(f'Error reading serial data: {e}')
 
     def publish_features(self):
         if self.latest_serial_state is None or self.latest_lidar is None:
+            now = time.time()
+            if now - self.last_wait_log > 3.0: # Log every 3 seconds
+                missing = []
+                if self.latest_serial_state is None: missing.append("Serial/IMU")
+                if self.latest_lidar is None: missing.append("LiDAR")
+                self.get_logger().info(f"Telemetery Blocked: Waiting for {', '.join(missing)} data...")
+                self.last_wait_log = now
             return
 
         combined_features = list(self.latest_serial_state) + list(self.latest_lidar)
